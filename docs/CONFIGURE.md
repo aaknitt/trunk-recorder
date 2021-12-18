@@ -264,7 +264,7 @@ This plugin does not, by itself, stream audio to any online services.  Because i
 | sendTGID  |           |    false     | boolean | When set to true, the TGID will be prepended in long integer format (4 bytes, little endian) to the audio data each time a UDP packet is sent. |
 
 ###### Plugin Object Example #1:
-This example will stream audio from talkgroup 58914 and 58916 to the local machine on UDP port 9123.  
+This example will stream audio from talkgroup 58914 to the local machine on UDP port 9123.  
 ```yaml
         {
           "name":"simplestream",
