@@ -78,7 +78,9 @@ class Freq_Send : public Plugin_Api {
         std::map<unsigned long,double> current_TGID_freqs = system.current_TGID_freqs;
         if(system.TGIDs.count(talkgroup_num)> 0 || system.units.count(unit_num) > 0){
           current_TGID_freqs[talkgroup_num] = freq;
-          //BOOST_LOG_TRIVIAL(info) << "adding "<<freq<<" to current_TGID_freqs["<<talkgroup_num<<"]";
+          if (system.units.count(unit_num) > 0){
+            BOOST_LOG_TRIVIAL(info) << "adding "<<freq<<" to current_TGID_freqs["<<talkgroup_num<<"] because unit "<<unit_num<<" was found";
+          }
         }
         else{
           current_TGID_freqs.erase(talkgroup_num);
@@ -89,6 +91,7 @@ class Freq_Send : public Plugin_Api {
     return 0;
   }
   
+  /*
   int audio_stream(Recorder *recorder, int16_t *samples, int sampleCount){
     //BOOST_LOG_TRIVIAL(info)<<"recorder "<<recorder->get_num()<< " is on freq "<<recorder->get_freq()<< " for TGID "<<recorder->get_talkgroup();
 	BOOST_FOREACH (system_t &system, systems){
@@ -98,6 +101,7 @@ class Freq_Send : public Plugin_Api {
 	}
 	return 0;
   }
+  */
     
   int call_end(Call_Data_t call_info) {
     boost::mutex::scoped_lock lock(freqlist_mutex);
@@ -127,6 +131,7 @@ class Freq_Send : public Plugin_Api {
       }
       BOOST_FOREACH (boost::property_tree::ptree::value_type &subnode, node.second.get_child("units")){
         system.units.insert(subnode.second.get<unsigned long>("",0));
+        BOOST_LOG_TRIVIAL(info) << "adding unit ID "<<subnode.second.get<unsigned long>("",0)<<" to "<<system.short_name;
       }
       system.address = node.second.get<std::string>("address");
       system.port = node.second.get<long>("port");
@@ -138,21 +143,8 @@ class Freq_Send : public Plugin_Api {
   int poll_one(){
     time_t current_time = time(NULL);
     float timeDiff = current_time - lastSendTime;
-    if (timeDiff >= 2.0){
+    if (timeDiff >= .2){
       lastSendTime = current_time;
-      std::string sendstring = "";
-      bool first = true;
-      BOOST_FOREACH (system_t system, systems){
-        BOOST_FOREACH (auto& element, system.current_TGID_freqs){
-          if (!first){
-            sendstring+=",";
-            first = false;
-          }
-          sendstring+=boost::lexical_cast<std::string>(element.second);
-          //BOOST_LOG_TRIVIAL(info) <<"adding "<<element.second<<" to sendstring";
-        }
-      }
-      BOOST_LOG_TRIVIAL(info) << "Frequency List is " << sendstring ;
       upload3();
     }
     return 0;
@@ -170,7 +162,7 @@ class Freq_Send : public Plugin_Api {
 
 
   int upload3(void){
-    //Since I'm to fucking dense to figure out how to do this using the built in curl libraries, I'll call curl externally instead.  This is really stupid.  
+    //Since I'm too fucking dense to figure out how to do this using the built in curl libraries, I'll call curl externally instead.  This is really stupid.  
     char shell_command[500];
     //curl -H "Content-Type: text/xml" -d @sample.xml -X POST 192.168.1.219:8080 -v
     std::string sendstring = "<?xml version='1.0'?><methodCall><methodName>set_freq_list</methodName><params><param><value><array><data>";
