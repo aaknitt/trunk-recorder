@@ -84,7 +84,6 @@ analog_recorder::analog_recorder(Source *src)
   talkgroup = 0;
   recording_count = 0;
   recording_duration = 0;
-  short_name = "";
 
   rec_num = rec_counter++;
   state = INACTIVE;
@@ -335,11 +334,6 @@ long analog_recorder::get_talkgroup() {
   return talkgroup;
 }
 
-std::string analog_recorder::get_short_name(){
-  return short_name;
-}
-
-
 double analog_recorder::get_freq() {
   return chan_freq;
 }
@@ -404,7 +398,6 @@ bool analog_recorder::start(Call *call) {
 
   talkgroup = call->get_talkgroup();
   chan_freq = call->get_freq();
-  short_name = call->get_short_name();
 
   squelch_db = system->get_squelch_db();
   squelch->set_threshold(squelch_db);

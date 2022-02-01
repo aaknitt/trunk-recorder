@@ -91,17 +91,19 @@ class Freq_Send : public Plugin_Api {
     return 0;
   }
   
-  /*
+  
   int audio_stream(Recorder *recorder, int16_t *samples, int sampleCount){
-    //BOOST_LOG_TRIVIAL(info)<<"recorder "<<recorder->get_num()<< " is on freq "<<recorder->get_freq()<< " for TGID "<<recorder->get_talkgroup();
+    //BOOST_LOG_TRIVIAL(info)<<"recorder "<<recorder->get_num()<< " is on freq "<<recorder->get_freq()<< " for TGID "<<recorder->get_talkgroup()<<" on system "<<recorder->get_short_name();
+	/*
 	BOOST_FOREACH (system_t &system, systems){
 	  if (0==system.short_name.compare(recorder->get_short_name())){
 		  system.current_TGID_freqs[recorder->get_talkgroup()] = recorder->get_freq();
 	  }
 	}
+	*/
 	return 0;
   }
-  */
+  
     
   int call_end(Call_Data_t call_info) {
     boost::mutex::scoped_lock lock(freqlist_mutex);
@@ -151,7 +153,6 @@ class Freq_Send : public Plugin_Api {
   }
 
   int start(){
-  upload3();
   return 0;
   }
   
