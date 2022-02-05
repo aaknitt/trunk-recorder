@@ -238,6 +238,12 @@ Call_Data_t Call_Concluder::create_call_data(Call *call, System *sys, Config con
   call_info.call_log = sys->get_call_log();
   call_info.call_num = call->get_call_num();
   call_info.compress_wav = sys->get_compress_wav();
+  call_info.error_count = 0;
+  call_info.spike_count = 0;
+  for(int k = 0;k<call->get_error_list_count();k++){
+    call_info.error_count = call_info.error_count + call->get_error_list()[k].error_count;
+    call_info.spike_count = call_info.spike_count + call->get_error_list()[k].spike_count;
+  }
   
   call_info.patched_talkgroups = sys->get_talkgroup_patch(call_info.talkgroup);
   

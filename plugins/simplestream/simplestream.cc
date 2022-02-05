@@ -77,7 +77,8 @@ class Simple_Stream : public Plugin_Api {
     std::string shortName = call_info.short_name;
     std::vector<unsigned long> patched_talkgroups = call_info.patched_talkgroups;
     std::vector<long> recorders_to_erase;
-    BOOST_LOG_TRIVIAL(debug) << "call_end called in simplestream plugin on TGID " << talkgroup_num << " with patch size " << patched_talkgroups.size() ;
+    BOOST_LOG_TRIVIAL(info) << "call_end called in simplestream plugin on TGID " << talkgroup_num << " with error count " << call_info.error_count<<" and spike count "<<call_info.spike_count;
+    //BOOST_LOG_TRIVIAL(debug) << "call_end called in simplestream plugin on TGID " << talkgroup_num << " with patch size " << patched_talkgroups.size() ;
     BOOST_FOREACH(auto& element, TGID_map){
       if (element.second.system_type.compare("conventional") || element.second.system_type.compare("conventionalDMR") || element.second.system_type.compare("conventionalP25")){
         BOOST_LOG_TRIVIAL(debug) << "conventional recorder - not removing!";

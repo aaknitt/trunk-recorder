@@ -37,6 +37,8 @@ struct Call_Data_t {
   char filename[300];
   char status_filename[300];
   char converted[300];
+  double error_count;
+  double spike_count;
 
   std::string talkgroup_tag;
   std::string short_name;
