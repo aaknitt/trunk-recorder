@@ -74,7 +74,6 @@
 
 #include "recorder.h"
 #include <gr_blocks/freq_xlating_fft_filter.h>
-#include <gr_blocks/nonstop_wavfile_sink.h>
 
 class Source;
 class sigmf_recorder;
@@ -119,7 +118,6 @@ public:
 
 private:
   double center, freq;
-  bool qpsk_mod;
   int silence_frames;
   long talkgroup;
   time_t timestamp;
@@ -161,7 +159,6 @@ private:
   gr::analog::feedforward_agc_cc::sptr agc;
   gr::analog::agc2_ff::sptr demod_agc;
   gr::analog::agc2_cc::sptr pre_demod_agc;
-  gr::blocks::nonstop_wavfile_sink::sptr wav_sink;
   gr::blocks::file_sink::sptr raw_sink;
   gr::blocks::short_to_float::sptr converter;
   gr::blocks::copy::sptr valve;

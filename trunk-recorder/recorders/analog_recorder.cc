@@ -2,7 +2,7 @@
 #include "analog_recorder.h"
 #include <gr_blocks/decoder_wrapper_impl.h>
 #include <gr_blocks/plugin_wrapper_impl.h>
-#include <gr_blocks/nonstop_wavfile_sink_impl.h>
+#include <gr_blocks/transmission_sink.h>
 #include "../formatter.h"
 #include "../recorder_globals.h"
 #include "../plugin_manager/plugin_manager.h"
@@ -202,7 +202,7 @@ analog_recorder::analog_recorder(Source *src)
 
   //tm *ltm = localtime(&starttime);
 
-  wav_sink = gr::blocks::nonstop_wavfile_sink_impl::make(1, wav_sample_rate, 16); //  Configurable
+  wav_sink = gr::blocks::transmission_sink::make(1, wav_sample_rate, 16); //  Configurable
 
   if(use_streaming) {
     BOOST_LOG_TRIVIAL(info) << "Creating plugin sink..." << std::endl;
@@ -406,7 +406,6 @@ bool analog_recorder::start(Call *call) {
   //BOOST_LOG_TRIVIAL(error) << "Setting squelch to: " << squelch_db << " block says: " << squelch->threshold();
   levels->set_k(system->get_analog_levels());
   int d_max_dev = system->get_max_dev();
-  double d_filter_width = system->get_filter_width();
   channel_lpf_taps = gr::filter::firdes::low_pass_2(1.0, initial_rate, d_max_dev, 1000, 100);
   channel_lpf->set_taps(channel_lpf_taps);
   quad_gain = system_channel_rate / (2.0 * M_PI * (d_max_dev + 1000));
