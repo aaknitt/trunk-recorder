@@ -181,6 +181,7 @@ Here is a map of the different sections of the *config.json* file:
 | digitalLevels          |          | 1                              | number (1-16)                                                | The amount of amplification that will be applied to the digital audio. |
 | unitTagsFile           |          |                                | string                                                       | This is the filename of a CSV files that provides information about the unit tags. It allows a Unit ID to be assigned a name. This file should be located in the same directory as the trunk-recorder executable. The format is 2 columns, the first being the decimal number of the Unit ID, the second is the Unit Name, |
 | recordUnknown          |          | true                           | **true** / **false**                                         | Record talkgroups if they are not listed in the Talkgroups File. |
+| recordUUVCalls         |          | true                           | **true** / **false**                                         | [ P25 only ] Record Unit to Unit Voice calls. 		     |
 | hideEncrypted          |          | false                          | **true** / **false**                                         | Hide encrypted talkgroups log entries                        |
 | hideUnknownTalkgroups  |          | false                          | **true** / **false**                                         | Hide unknown talkgroups log entries                          |
 | minDuration            |          | 0<br />(which is disabled)     | number                                                       | The minimum call duration in seconds (decimals allowed), calls below this number will have recordings deleted and will not be uploaded. |
@@ -343,11 +344,11 @@ pulseaudio is the default sound system on many Linux computers, including the Ra
 
 An example command to set up pulseaudio to receive 8 kHz audio (digital audio) from simplestream on TCP port 9125:
 ```
-pacmd load-module module-simple-protocol-tcp sink=1 playback=true port=9125 format=s16be rate=8000 channels=1 
+pacmd load-module module-simple-protocol-tcp sink=1 playback=true port=9125 format=s16le rate=8000 channels=1 
 ```
 An example command to set up pulseaudio to receive 16 kHz audio (analog audio) from simplestream on TCP port 9125:
 ```
-pacmd load-module module-simple-protocol-tcp sink=1 playback=true port=9125 format=s16be rate=16000 channels=1 
+pacmd load-module module-simple-protocol-tcp sink=1 playback=true port=9125 format=s16le rate=16000 channels=1 
 ```
 The matching simplestream config to send audio from talkgroup 58918 to TCP port 9125 would then be something like this:
 ```yaml
@@ -358,7 +359,7 @@ The matching simplestream config to send audio from talkgroup 58918 to TCP port 
             "TGID":58918,
             "address":"127.0.0.1",
             "port":9125,
-            "sendTGID":true,
+            "sendTGID":false,
             "shortName":"CountyTrunked",
             "useTCP":true}
         }

@@ -32,7 +32,7 @@ int combine_wav(std::string files, char *target_filename) {
 int convert_media(char *filename, char *converted) {
   char shell_command[400];
 
-  int nchars = snprintf(shell_command, 400, "sox %s --norm=-.01 -t wav - | fdkaac --silent  -p 2 --ignorelength -b 8000 -o %s -", filename, converted);
+  int nchars = snprintf(shell_command, 400, "sox %s --norm=-.01 -t wav - | fdkaac --silent  -p 2 --moov-before-mdat --ignorelength -b 8000 -o %s -", filename, converted);
 
   if (nchars >= 400) {
     BOOST_LOG_TRIVIAL(error) << "Call uploader: Command longer than 400 characters";
@@ -236,7 +236,7 @@ Call_Data_t Call_Concluder::create_call_data(Call *call, System *sys, Config con
   call_info.emergency = call->get_emergency();
   call_info.tdma_slot = call->get_tdma_slot();
   call_info.phase2_tdma = call->get_phase2_tdma();
-  call_info.transmission_list = call->transmission_list;
+  call_info.transmission_list = call->get_transmissions();
   call_info.short_name = sys->get_short_name();
   call_info.upload_script = sys->get_upload_script();
   call_info.audio_archive = sys->get_audio_archive();
@@ -272,7 +272,7 @@ Call_Data_t Call_Concluder::create_call_data(Call *call, System *sys, Config con
 
     // loop through the transmission list, pull in things to fill in totals for call_info
     // Using a for loop with iterator
-    for (std::vector<Transmission>::iterator it = call_info.transmission_list.begin(); it != call_info.transmission_list.end(); ++it) {
+    for (std::vector<Transmission>::iterator it = call_info.transmission_list.begin(); it != call_info.transmission_list.end();) {
       Transmission t = *it;
       char formattedTalkgroup[62];
 
@@ -288,6 +288,8 @@ Call_Data_t Call_Concluder::create_call_data(Call *call, System *sys, Config con
             remove(t.filename);
           }
         }
+        
+        it = call_info.transmission_list.erase(it);
         continue;
       } 
       snprintf(formattedTalkgroup, 61, "%c[%dm%10ld%c[0m", 0x1B, 35, call_info.talkgroup, 0x1B);
@@ -313,6 +315,7 @@ Call_Data_t Call_Concluder::create_call_data(Call *call, System *sys, Config con
       call_info.transmission_error_list.push_back(call_error);
 
       total_length = total_length + t.length;
+      it++;
     }
 
     call_info.length = total_length;

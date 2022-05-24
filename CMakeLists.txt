@@ -22,7 +22,20 @@
 ########################################################################
 
 cmake_minimum_required(VERSION 3.2)
-project(Trunk-Recorder CXX C)
+project(Trunk-Recorder LANGUAGES CXX C VERSION "4.3.2")
+
+configure_file(cmake.h.in "${PROJECT_SOURCE_DIR}/cmake.h" @ONLY)
+
+# Define the two required variables before including
+# the source code for watching a git repository.
+set(PRE_CONFIGURE_FILE "git.cc.in")
+set(POST_CONFIGURE_FILE "${CMAKE_CURRENT_BINARY_DIR}/git.cc")
+include(git_watcher.cmake)
+
+# Create a library out of the compiled post-configure file.
+add_library(git ${POST_CONFIGURE_FILE})
+target_include_directories(git PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+add_dependencies(git check_git)
 
 # Select the release build type by default to get optimization flags
 if(NOT CMAKE_BUILD_TYPE)
@@ -218,7 +231,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -Wno-narrowing -fvisibility=hid
 
 list(APPEND trunk_recorder_sources
   trunk-recorder/recorders/recorder.cc
-  trunk-recorder/call.cc
+  trunk-recorder/call_impl.cc
   trunk-recorder/formatter.cc
   trunk-recorder/source.cc
   trunk-recorder/call_conventional.cc
@@ -227,12 +240,12 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/systems/smartnet_parser.cc
   trunk-recorder/systems/p25_parser.cc
   trunk-recorder/systems/smartnet_decode.cc
-  trunk-recorder/systems/system.cc
-  trunk-recorder/recorders/debug_recorder.cc
-  trunk-recorder/recorders/sigmf_recorder.cc
+  trunk-recorder/systems/system_impl.cc
+  trunk-recorder/recorders/debug_recorder_impl.cc
+  trunk-recorder/recorders/sigmf_recorder_impl.cc
   trunk-recorder/recorders/analog_recorder.cc
-  trunk-recorder/recorders/dmr_recorder.cc
-  trunk-recorder/recorders/p25_recorder.cc
+  trunk-recorder/recorders/dmr_recorder_impl.cc
+  trunk-recorder/recorders/p25_recorder_impl.cc
   trunk-recorder/recorders/p25_recorder_fsk4_demod.cc
   trunk-recorder/recorders/p25_recorder_qpsk_demod.cc
   trunk-recorder/recorders/p25_recorder_decode.cc
@@ -245,19 +258,25 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/call_concluder/call_concluder.cc
 
   lib/lfsr/lfsr.cxx
-  lib/gr_blocks/freq_xlating_fft_filter.cc
-  lib/gr_blocks/transmission_sink.cc
-  lib/gr_blocks/decoders/fsync_decode.cc
-  lib/gr_blocks/decoders/mdc_decode.cc
-  lib/gr_blocks/decoders/star_decode.cc
-  lib/gr_blocks/decoders/signal_decoder_sink_impl.cc
-  lib/gr_blocks/decoders/tps_decoder_sink_impl.cc
-  lib/gr_blocks/decoder_wrapper_impl.cc
-  lib/gr_blocks/plugin_wrapper_impl.cc
-  lib/gr_blocks/selector_impl.cc
-  lib/gr_blocks/wavfile_gr3.8.cc
+  trunk-recorder/gr_blocks/freq_xlating_fft_filter.cc
+  trunk-recorder/gr_blocks/transmission_sink.cc
+  trunk-recorder/gr_blocks/decoders/fsync_decode.cc
+  trunk-recorder/gr_blocks/decoders/mdc_decode.cc
+  trunk-recorder/gr_blocks/decoders/star_decode.cc
+  trunk-recorder/gr_blocks/decoders/signal_decoder_sink_impl.cc
+  trunk-recorder/gr_blocks/decoders/tps_decoder_sink_impl.cc
+  trunk-recorder/gr_blocks/decoder_wrapper_impl.cc
+  trunk-recorder/gr_blocks/plugin_wrapper_impl.cc
+  trunk-recorder/gr_blocks/selector_impl.cc
+  trunk-recorder/gr_blocks/wavfile_gr3.8.cc
   )
 
+
+
+  list(APPEND trunk_recorder_headers
+    trunk-recorder/call.h
+    trunk-recorder/plugin_manager/plugin_api.h
+  )
 set_source_files_properties(lib/lfsr/lfsr.cxx COMPILE_FLAGS "-w")
 
 
@@ -288,6 +307,22 @@ set_property(
 )
 
 
+set_target_properties(trunk_recorder_library PROPERTIES OUTPUT_NAME "trunk-recorder")
+set_target_properties(trunk_recorder_library PROPERTIES PUBLIC_HEADER "${trunk_recorder_headers}")
+
+
+# Weird - when I add LIBRARY before the DESTINATION, it installs in the /usr/local/lib dir on a mac
+install(TARGETS trunk_recorder_library 
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/trunk-recorder
+)
+    
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/trunk-recorder/" # source directory
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/trunk-recorder" # target directory
+    FILES_MATCHING # install only matched files
+    PATTERN "*.h" # select header files
+)
+
+
 add_subdirectory(plugins/openmhz_uploader)
 
 add_subdirectory(plugins/stat_socket)
@@ -304,7 +339,7 @@ add_subdirectory(plugins/freqsend)
 
 add_executable(trunk-recorder trunk-recorder/main.cc ${trunk_recorder_sources})
 
-target_link_libraries(trunk-recorder trunk_recorder_library gnuradio-op25_repeater   ${CMAKE_DL_LIBS} ssl crypto ${CURL_LIBRARIES} ${Boost_LIBRARIES} ${GNURADIO_PMT_LIBRARIES} ${GNURADIO_RUNTIME_LIBRARIES} ${GNURADIO_FILTER_LIBRARIES} ${GNURADIO_DIGITAL_LIBRARIES} ${GNURADIO_ANALOG_LIBRARIES} ${GNURADIO_AUDIO_LIBRARIES} ${GNURADIO_UHD_LIBRARIES} ${UHD_LIBRARIES} ${GNURADIO_BLOCKS_LIBRARIES} ${GNURADIO_OSMOSDR_LIBRARIES}  ) # gRPC::grpc++_reflection protobuf::libprotobuf)
+target_link_libraries(trunk-recorder git trunk_recorder_library gnuradio-op25_repeater   ${CMAKE_DL_LIBS} ssl crypto ${CURL_LIBRARIES} ${Boost_LIBRARIES} ${GNURADIO_PMT_LIBRARIES} ${GNURADIO_RUNTIME_LIBRARIES} ${GNURADIO_FILTER_LIBRARIES} ${GNURADIO_DIGITAL_LIBRARIES} ${GNURADIO_ANALOG_LIBRARIES} ${GNURADIO_AUDIO_LIBRARIES} ${GNURADIO_UHD_LIBRARIES} ${UHD_LIBRARIES} ${GNURADIO_BLOCKS_LIBRARIES} ${GNURADIO_OSMOSDR_LIBRARIES}  ) # gRPC::grpc++_reflection protobuf::libprotobuf)
 
 message(STATUS "All libraries:" ${GNURADIO_ALL_LIBRARIES})
 if(NOT Gnuradio_VERSION VERSION_LESS "3.8")
