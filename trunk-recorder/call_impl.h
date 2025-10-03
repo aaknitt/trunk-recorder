@@ -90,6 +90,7 @@ public:
   std::string get_system_type();
   double get_final_length();
   long get_current_source_id();
+  void set_current_source_id(long src);
   bool get_conversation_mode();
   System *get_system();
   std::vector<Transmission> get_transmissions();

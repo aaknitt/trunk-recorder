@@ -23,6 +23,7 @@
 
 #include "transmission_sink.h"
 #include "../../trunk-recorder/call.h"
+#include "../../trunk-recorder/call_impl.h"
 #include <boost/filesystem.hpp>
 #include <boost/math/special_functions/round.hpp>
 #include <climits>
@@ -203,11 +204,26 @@ bool transmission_sink::open_internal(const char *filename) {
 
 void transmission_sink::set_source(long src) {
   std::string loghdr = log_header(d_current_call_short_name,d_current_call_num,d_current_call_talkgroup_display,d_current_call_freq);
+  BOOST_LOG_TRIVIAL(debug) << loghdr << "transmission_sink::set_source called with src=" << src << " curr_src_id=" << curr_src_id;
+  
   if (curr_src_id == -1) {
 
     BOOST_LOG_TRIVIAL(info) << loghdr << "Unit ID set via Control Channel, ext: " << src << "\tcurrent: " << curr_src_id << "\t samples: " << d_sample_count;
 
     curr_src_id = src;
+    // Update the call's source ID so get_current_source_id() returns the correct value
+    if (d_current_call) {
+      Call_impl *call_impl = dynamic_cast<Call_impl*>(d_current_call);
+      if (call_impl) {
+        BOOST_LOG_TRIVIAL(debug) << loghdr << "Calling call_impl->set_current_source_id(" << src << ")";
+        call_impl->set_current_source_id(src);
+        BOOST_LOG_TRIVIAL(debug) << loghdr << "After set_current_source_id, call->get_current_source_id()=" << d_current_call->get_current_source_id();
+      } else {
+        BOOST_LOG_TRIVIAL(error) << loghdr << "Failed to cast call to Call_impl";
+      }
+    } else {
+      BOOST_LOG_TRIVIAL(error) << loghdr << "d_current_call is NULL";
+    }
   }
   else if (d_conventional && (src != curr_src_id)) {
     if ((state == RECORDING) && (d_sample_count > 0)) {
@@ -216,6 +232,19 @@ void transmission_sink::set_source(long src) {
         end_transmission();
         state = IDLE;
         curr_src_id = src;
+        // Update the call's source ID for conventional systems
+        if (d_current_call) {
+          Call_impl *call_impl = dynamic_cast<Call_impl*>(d_current_call);
+          if (call_impl) {
+            BOOST_LOG_TRIVIAL(debug) << loghdr << "Conventional: Calling call_impl->set_current_source_id(" << src << ")";
+            call_impl->set_current_source_id(src);
+            BOOST_LOG_TRIVIAL(debug) << loghdr << "After set_current_source_id, call->get_current_source_id()=" << d_current_call->get_current_source_id();
+          } else {
+            BOOST_LOG_TRIVIAL(error) << loghdr << "Conventional: Failed to cast call to Call_impl";
+          }
+        } else {
+          BOOST_LOG_TRIVIAL(error) << loghdr << "Conventional: d_current_call is NULL";
+        }
     }
 
   }

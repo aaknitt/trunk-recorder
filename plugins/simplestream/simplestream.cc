@@ -70,6 +70,9 @@ class Simple_Stream : public Plugin_Api {
     uint32_t call_freq = call->get_freq();
     std::string call_short_name = call->get_short_name();
     std::string call_src_tag = call_system->find_unit_tag(call_src);
+    
+    // Debug: Log the initial source ID and transmission count
+    BOOST_LOG_TRIVIAL(debug) << "audio_stream: call_src=" << call_src << " transmission_count=" << call->get_transmissions().size();
     std::vector<unsigned long> unsigned_patched_talkgroups = call_system->get_talkgroup_patch(call_tgid);
     std::vector<long> patched_talkgroups;
     // Convert unsigned long to signed long, preserving negative values
@@ -78,6 +81,7 @@ class Simple_Stream : public Plugin_Api {
     }
 
     if(call_src == -1){
+      BOOST_LOG_TRIVIAL(debug) << "audio_stream: call_src is -1, checking transmissions...";
       if(call->get_transmissions().size() > 0){
         // Get the source from the most recent transmission
         auto transmissions = call->get_transmissions();
@@ -87,6 +91,9 @@ class Simple_Stream : public Plugin_Api {
       else{
         BOOST_LOG_TRIVIAL(info) << "no source found for call - leaving src as -1";
       }
+    }
+    else {
+      BOOST_LOG_TRIVIAL(debug) << "audio_stream: using current source " << call_src;
     }
 
     Recorder& local_recorder = *recorder;

@@ -353,6 +353,36 @@ long Call_impl::get_current_source_id() {
   return curr_src_id;
 }
 
+void Call_impl::set_current_source_id(long src) {
+  std::string loghdr = log_header(this->get_short_name(), this->get_call_num(), this->get_talkgroup_display(), this->get_freq());
+  BOOST_LOG_TRIVIAL(debug) << loghdr << "Call_impl::set_current_source_id called with src=" << src << " current curr_src_id=" << curr_src_id;
+  
+  if (src == -1) {
+    BOOST_LOG_TRIVIAL(debug) << loghdr << "set_current_source_id: src is -1, returning";
+    return;
+  }
+
+  if (src == curr_src_id) {
+    BOOST_LOG_TRIVIAL(debug) << loghdr << "set_current_source_id: src same as current, returning";
+    return;
+  }
+
+  BOOST_LOG_TRIVIAL(debug) << loghdr << "set_current_source_id: updating curr_src_id from " << curr_src_id << " to " << src;
+  curr_src_id = src;
+
+  if (state == RECORDING) {
+    Recorder *rec = this->get_recorder();
+    if (rec != NULL) {
+      BOOST_LOG_TRIVIAL(debug) << loghdr << "set_current_source_id: calling rec->set_source(" << src << ")";
+      rec->set_source(src);
+    }
+  }
+
+  BOOST_LOG_TRIVIAL(debug) << loghdr << "set_current_source_id: calling plugman_signal";
+  plugman_signal(src, NULL, gr::blocks::SignalType::Normal, this, this->get_system(), NULL);
+  BOOST_LOG_TRIVIAL(debug) << loghdr << "set_current_source_id: completed, curr_src_id is now " << curr_src_id;
+}
+
 bool Call_impl::add_source(long src) {
   if (src == -1) {
     return false;
