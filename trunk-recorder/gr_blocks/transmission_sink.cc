@@ -248,6 +248,21 @@ void transmission_sink::set_source(long src) {
     }
 
   }
+  else if (d_conventional && (src == curr_src_id)) {
+    // Source ID is already set, but we need to ensure it's propagated to the call object
+    if (d_current_call) {
+      Call_impl *call_impl = dynamic_cast<Call_impl*>(d_current_call);
+      if (call_impl) {
+        BOOST_LOG_TRIVIAL(debug) << loghdr << "Source already set, ensuring call object is updated: " << src;
+        call_impl->set_current_source_id(src);
+        BOOST_LOG_TRIVIAL(debug) << loghdr << "After set_current_source_id, call->get_current_source_id()=" << d_current_call->get_current_source_id();
+      } else {
+        BOOST_LOG_TRIVIAL(error) << loghdr << "Failed to cast call to Call_impl";
+      }
+    } else {
+      BOOST_LOG_TRIVIAL(error) << loghdr << "d_current_call is NULL";
+    }
+  }
 }
 
 void transmission_sink::end_transmission() {
@@ -390,6 +405,8 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
         // BOOST_LOG_TRIVIAL(info) << "Updated Voice Channel source id: " << src_id << " pos: " << pos << " offset: " << tags[i].offset - nitems_read(0);
 
         curr_src_id = src_id;
+        // Call set_source to propagate the source ID to the call object
+        set_source(src_id);
       } else if (src_id != curr_src_id) {
         if (state == RECORDING) {
 
@@ -407,6 +424,8 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
             }*/
 
           curr_src_id = src_id;
+          // Call set_source to propagate the source ID to the call object
+          set_source(src_id);
         }
         // BOOST_LOG_TRIVIAL(info) << "Updated Voice Channel source id: " << src_id << " pos: " << pos << " offset: " << tags[i].offset - nitems_read(0);
       }

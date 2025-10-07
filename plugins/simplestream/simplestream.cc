@@ -9,13 +9,39 @@ using namespace boost::asio;
 
 typedef struct plugin_t plugin_t;
 typedef struct stream_t stream_t;
+typedef struct audio_frame_t audio_frame_t;
+typedef struct call_buffer_t call_buffer_t;
+
 std::vector<stream_t> streams;
 io_service my_tcp_io_service;
 long max_tcp_index = 0;
 
-struct plugin_t {
-  Config* config;
+struct audio_frame_t {
+  int16_t *samples;
+  int sampleCount;
+  long source_id;
+  std::string call_short_name;
+  long call_tgid;
+  uint32_t call_freq;
+  std::string call_src_tag;
+  std::string call_tgid_tag;
+  std::vector<long> patched_talkgroups;
+  std::vector<std::string> patched_talkgroup_tags;
+  int recorder_id;
+  long wav_hz;
 };
+
+struct call_buffer_t {
+  std::vector<audio_frame_t> frames;
+  bool source_id_detected;
+  long current_source_id;
+  bool sending_started;
+  std::string call_key;
+  std::chrono::time_point<std::chrono::steady_clock> last_activity;
+  std::vector<std::string> patched_talkgroup_tags;
+};
+
+std::map<std::string, call_buffer_t> call_buffers;
 
 struct stream_t {
   long TGID;
@@ -30,7 +56,88 @@ struct stream_t {
   bool sendCallStart = false;
   bool sendCallEnd = false;
   bool tcp = false;
+  bool enable_buffering = false;
+  int max_buffer_frames = 3;
 };
+
+// Global configuration
+int buffer_timeout_seconds = 30; // Clean up buffers older than 30 seconds
+
+// Helper function to create call key
+std::string create_call_key(Call *call) {
+  return call->get_short_name() + "_" + std::to_string(call->get_talkgroup()) + "_" + std::to_string(call->get_call_num());
+}
+
+// Helper function to send buffered frames
+void send_buffered_frames(call_buffer_t &buffer, long source_id, ip::udp::socket &socket) {
+  BOOST_LOG_TRIVIAL(debug) << "Sending " << buffer.frames.size() << " buffered frames with source_id=" << source_id;
+  for (auto &frame : buffer.frames) {
+    // Update source ID for all buffered frames
+    frame.source_id = source_id;
+    
+    // Send the frame using existing logic
+    BOOST_FOREACH (auto stream, streams) {
+      if ((stream.TGID == static_cast<long>(frame.call_tgid)) || stream.TGID == 0) {
+        if (0==stream.short_name.compare(frame.call_short_name) || (0==stream.short_name.compare(""))) {
+          // For streams with buffering disabled, use the original source_id from the frame
+          // For streams with buffering enabled, use the detected source_id
+          long stream_source_id = stream.enable_buffering ? source_id : frame.source_id;
+          std::vector<boost::asio::const_buffer> send_buffer;
+          
+          if (stream.sendJSON == true) {
+            json json_object = {
+              {"src", stream_source_id},
+              {"tgid", frame.call_tgid},
+              {"freq", frame.call_freq},
+              {"short_name", frame.call_short_name},
+              {"src_tag", frame.call_src_tag},
+              {"tgid_tag", frame.call_tgid_tag},
+              {"patched_talkgroups", frame.patched_talkgroups},
+              {"recorder_id", frame.recorder_id},
+              {"audio_sample_rate", frame.wav_hz},
+              {"event", "audio"}
+            };
+            
+            std::string json_string = json_object.dump();
+            uint32_t json_length = json_string.length();
+            BOOST_LOG_TRIVIAL(debug) << "Sending buffered frame JSON: " << json_string;
+            send_buffer.push_back(boost::asio::buffer(&json_length, 4));
+            send_buffer.push_back(boost::asio::buffer(json_string));
+          }
+          else if (stream.sendTGID == true) {
+            send_buffer.push_back(boost::asio::buffer(&frame.call_tgid, 4));
+          }
+          
+          send_buffer.push_back(boost::asio::buffer(frame.samples, frame.sampleCount * 2));
+          
+          if (stream.tcp == true) {
+            stream.tcp_socket->send(send_buffer);
+          } else {
+            boost::system::error_code error;
+            socket.send_to(send_buffer, stream.remote_endpoint, 0, error);
+          }
+        }
+      }
+    }
+  }
+  buffer.frames.clear();
+}
+
+// Helper function to clean up stale buffers
+void cleanup_stale_buffers() {
+  auto now = std::chrono::steady_clock::now();
+  auto timeout_duration = std::chrono::seconds(buffer_timeout_seconds);
+  
+  for (auto it = call_buffers.begin(); it != call_buffers.end();) {
+    auto elapsed = now - it->second.last_activity;
+    if (elapsed > timeout_duration) {
+      BOOST_LOG_TRIVIAL(debug) << "Cleaning up stale buffer for call: " << it->first;
+      it = call_buffers.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
 
 class Simple_Stream : public Plugin_Api {
   typedef boost::asio::io_service io_service;
@@ -56,14 +163,15 @@ class Simple_Stream : public Plugin_Api {
       stream.sendCallEnd = element.value("sendCallEnd",false);
       stream.tcp = element.value("useTCP",false);
       stream.short_name = element.value("shortName", "");
-      BOOST_LOG_TRIVIAL(info) << "simplestreamer will stream audio from TGID " <<stream.TGID << " on System " <<stream.short_name << " to " << stream.address <<" on port " << stream.port << " tcp is "<<stream.tcp;
+      stream.enable_buffering = element.value("enableBuffering", false);
+      stream.max_buffer_frames = element.value("maxBufferFrames", 3);
+      BOOST_LOG_TRIVIAL(info) << "simplestreamer will stream audio from TGID " <<stream.TGID << " on System " <<stream.short_name << " to " << stream.address <<" on port " << stream.port << " tcp is "<<stream.tcp << " buffering is " << stream.enable_buffering;
       streams.push_back(stream);
     }
     return 0;
   }
   
   int audio_stream(Call *call, Recorder *recorder, int16_t *samples, int sampleCount){
-    //Call local_call = *call;
     System *call_system = call->get_system();
     int32_t call_tgid = call->get_talkgroup();
     int32_t call_src = call->get_current_source_id();
@@ -73,6 +181,7 @@ class Simple_Stream : public Plugin_Api {
     
     // Debug: Log the initial source ID and transmission count
     BOOST_LOG_TRIVIAL(debug) << "audio_stream: call_src=" << call_src << " transmission_count=" << call->get_transmissions().size();
+    
     std::vector<unsigned long> unsigned_patched_talkgroups = call_system->get_talkgroup_patch(call_tgid);
     std::vector<long> patched_talkgroups;
     // Convert unsigned long to signed long, preserving negative values
@@ -80,33 +189,89 @@ class Simple_Stream : public Plugin_Api {
       patched_talkgroups.push_back(static_cast<long>(tgid));
     }
 
-    if(call_src == -1){
-      BOOST_LOG_TRIVIAL(debug) << "audio_stream: call_src is -1, checking transmissions...";
-      if(call->get_transmissions().size() > 0){
-        // Get the source from the most recent transmission
-        auto transmissions = call->get_transmissions();
-        call_src = transmissions.back().source;
-        BOOST_LOG_TRIVIAL(info) << "using source " << call_src << " from most recent transmission";
-      }
-      else{
-        BOOST_LOG_TRIVIAL(info) << "no source found for call - leaving src as -1";
-      }
-    }
-    else {
-      BOOST_LOG_TRIVIAL(debug) << "audio_stream: using current source " << call_src;
-    }
-
     Recorder& local_recorder = *recorder;
     int recorder_id = local_recorder.get_num();
     long wav_hz = local_recorder.get_wav_hz();
     boost::system::error_code error;
+    std::vector<std::string> patched_talkgroup_tags;
+    
+    // Populate talkgroup tags for all patched talkgroups (outside the stream loop)
+    if (patched_talkgroups.size() == 0){
+      patched_talkgroups.push_back(call_tgid);  //call_info.talkgroup may be negative - we cast stream.TGID to signed for comparison
+    }
+    BOOST_FOREACH (auto TGID, patched_talkgroups){
+      Talkgroup* tg = call_system->find_talkgroup(static_cast<unsigned long>(TGID));
+      if (tg != nullptr && !tg->alpha_tag.empty()) {
+        patched_talkgroup_tags.push_back(tg->alpha_tag);
+      }
+    }
+    
     BOOST_FOREACH (auto stream, streams){
       if (0==stream.short_name.compare(call_short_name) || (0==stream.short_name.compare(""))){ //Check if shortName matches or is not specified
-        if (patched_talkgroups.size() == 0){
-          patched_talkgroups.push_back(call_tgid);  //call_info.talkgroup may be negative - we cast stream.TGID to signed for comparison
-        }
         BOOST_FOREACH (auto TGID, patched_talkgroups){
           if ((TGID==static_cast<long>(stream.TGID)) || stream.TGID==0){  //setting TGID to 0 in the config file will stream everything
+            
+            // Check if this specific stream has buffering enabled
+            if (stream.enable_buffering) {
+              std::string call_key = create_call_key(call) + "_" + std::to_string(stream.TGID);
+              
+              // Initialize buffer if it doesn't exist
+              if (call_buffers.find(call_key) == call_buffers.end()) {
+                call_buffers[call_key] = call_buffer_t();
+                call_buffers[call_key].source_id_detected = false;
+                call_buffers[call_key].current_source_id = -1;
+                call_buffers[call_key].sending_started = false;
+                call_buffers[call_key].call_key = call_key;
+                call_buffers[call_key].last_activity = std::chrono::steady_clock::now();
+              }
+              
+              call_buffer_t &buffer = call_buffers[call_key];
+              buffer.last_activity = std::chrono::steady_clock::now(); // Update activity timestamp
+              
+              // Check if source ID was just detected
+              if (call_src != -1 && !buffer.source_id_detected) {
+                buffer.source_id_detected = true;
+                buffer.current_source_id = call_src;
+                BOOST_LOG_TRIVIAL(debug) << "Source ID detected for " << call_key << ": " << call_src;
+                
+                // Send all buffered frames with the detected source ID
+                send_buffered_frames(buffer, call_src, my_socket);
+                buffer.sending_started = true;
+              }
+              
+              // If we're still buffering and haven't started sending
+              if (!buffer.sending_started) {
+                // Create audio frame for buffering
+                audio_frame_t frame;
+                frame.samples = samples;
+                frame.sampleCount = sampleCount;
+                frame.source_id = call_src;
+                frame.call_short_name = call_short_name;
+                frame.call_tgid = call_tgid;
+                frame.call_freq = call_freq;
+                frame.call_src_tag = call_src_tag;
+                frame.call_tgid_tag = call->get_talkgroup_tag();
+                frame.patched_talkgroups = patched_talkgroups;
+                frame.recorder_id = recorder->get_num();
+                frame.wav_hz = recorder->get_wav_hz();
+                if (patched_talkgroup_tags.size() > 0){
+                  frame.patched_talkgroup_tags = patched_talkgroup_tags;
+                }
+                
+                buffer.frames.push_back(frame);
+                
+                // Check if we've reached max buffer size
+                if (buffer.frames.size() >= static_cast<size_t>(stream.max_buffer_frames)) {
+                  BOOST_LOG_TRIVIAL(debug) << "Max buffer size reached for " << call_key << ", sending with current source ID";
+                  send_buffered_frames(buffer, call_src, my_socket);
+                  buffer.sending_started = true;
+                }
+                
+                continue; // Skip sending this frame for this stream
+              }
+            }
+            
+            // Send immediately (for non-buffering streams or after buffering is complete)
             BOOST_LOG_TRIVIAL(debug) << "got " <<sampleCount <<" samples - " <<sampleCount*2<<" bytes from recorder "<<recorder_id<<" for TGID "<<TGID;
             json json_object;
             std::string json_string;
@@ -123,6 +288,9 @@ class Simple_Stream : public Plugin_Api {
                  {"audio_sample_rate",wav_hz},
                  {"event","audio"},
               };
+              if (patched_talkgroup_tags.size() > 0){
+                json_object["patched_talkgroup_tags"] = patched_talkgroup_tags;
+              }
               json_string = json_object.dump();
               uint32_t json_length = json_string.length();  //determine length in bytes
               //BOOST_LOG_TRIVIAL(debug) << "json_length is " <<json_length <<" bytes";
@@ -220,6 +388,13 @@ class Simple_Stream : public Plugin_Api {
   }
 
   int call_end(Call_Data_t call_info) {
+    // Clean up any buffered frames for this call
+    std::string call_key = call_info.short_name + "_" + std::to_string(call_info.talkgroup) + "_" + std::to_string(call_info.call_num);
+    if (call_buffers.find(call_key) != call_buffers.end()) {
+      BOOST_LOG_TRIVIAL(debug) << "Clearing buffer for call: " << call_key;
+      call_buffers.erase(call_key);
+    }
+    
     boost::system::error_code error;
     BOOST_FOREACH (auto stream, streams){
       if (stream.sendJSON == true && stream.sendCallEnd == true){
@@ -292,6 +467,12 @@ class Simple_Stream : public Plugin_Api {
   static boost::shared_ptr<Simple_Stream> create() {
     return boost::shared_ptr<Simple_Stream>(
         new Simple_Stream());
+  }
+  
+  int poll_one(plugin_t * const plugin) {
+    // Clean up stale buffers to prevent memory leaks
+    cleanup_stale_buffers();
+    return 0;
   }
 };
 
