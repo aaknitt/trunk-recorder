@@ -4,6 +4,7 @@
 #include <boost/foreach.hpp>
 #include <boost/asio.hpp>
 #include <boost/array.hpp>
+#include <mutex>
 
 using namespace boost::asio;
 
@@ -42,6 +43,7 @@ struct call_buffer_t {
 };
 
 std::map<std::string, call_buffer_t> call_buffers;
+std::mutex call_buffers_mutex; // Thread safety for buffer operations
 
 struct stream_t {
   long TGID;
@@ -69,19 +71,20 @@ std::string create_call_key(Call *call) {
 }
 
 // Helper function to send buffered frames
+// This function is called when a source ID is detected for a buffered call.
+// It sends all previously buffered audio frames with the correct source ID.
 void send_buffered_frames(call_buffer_t &buffer, long source_id, ip::udp::socket &socket) {
   BOOST_LOG_TRIVIAL(debug) << "Sending " << buffer.frames.size() << " buffered frames with source_id=" << source_id;
-  for (auto &frame : buffer.frames) {
-    // Update source ID for all buffered frames
-    frame.source_id = source_id;
-    
-    // Send the frame using existing logic
+  
+  // Process each buffered frame
+  for (auto &frame : buffer.frames) {    
+    // Send the frame using existing logic for all matching streams
     BOOST_FOREACH (auto stream, streams) {
       if ((stream.TGID == static_cast<long>(frame.call_tgid)) || stream.TGID == 0) {
         if (0==stream.short_name.compare(frame.call_short_name) || (0==stream.short_name.compare(""))) {
-          // For streams with buffering disabled, use the original source_id from the frame
-          // For streams with buffering enabled, use the detected source_id
-          long stream_source_id = stream.enable_buffering ? source_id : frame.source_id;
+          // Source ID logic: Use frame's original source_id if valid, otherwise use detected source_id
+          // This handles cases where frames were buffered with different source IDs
+          long stream_source_id = (frame.source_id != -1) ? frame.source_id : source_id;
           std::vector<boost::asio::const_buffer> send_buffer;
           
           if (stream.sendJSON == true) {
@@ -111,10 +114,17 @@ void send_buffered_frames(call_buffer_t &buffer, long source_id, ip::udp::socket
           send_buffer.push_back(boost::asio::buffer(frame.samples, frame.sampleCount * 2));
           
           if (stream.tcp == true) {
-            stream.tcp_socket->send(send_buffer);
+            try {
+              stream.tcp_socket->send(send_buffer);
+            } catch (const boost::system::system_error& e) {
+              BOOST_LOG_TRIVIAL(error) << "TCP send error for stream " << stream.TGID << ": " << e.what();
+            }
           } else {
             boost::system::error_code error;
             socket.send_to(send_buffer, stream.remote_endpoint, 0, error);
+            if (error) {
+              BOOST_LOG_TRIVIAL(error) << "UDP send error for stream " << stream.TGID << ": " << error.message();
+            }
           }
         }
       }
@@ -125,6 +135,7 @@ void send_buffered_frames(call_buffer_t &buffer, long source_id, ip::udp::socket
 
 // Helper function to clean up stale buffers
 void cleanup_stale_buffers() {
+  std::lock_guard<std::mutex> lock(call_buffers_mutex);
   auto now = std::chrono::steady_clock::now();
   auto timeout_duration = std::chrono::seconds(buffer_timeout_seconds);
   
@@ -165,7 +176,18 @@ class Simple_Stream : public Plugin_Api {
       stream.short_name = element.value("shortName", "");
       stream.enable_buffering = element.value("enableBuffering", false);
       stream.max_buffer_frames = element.value("maxBufferFrames", 3);
-      BOOST_LOG_TRIVIAL(info) << "simplestreamer will stream audio from TGID " <<stream.TGID << " on System " <<stream.short_name << " to " << stream.address <<" on port " << stream.port << " tcp is "<<stream.tcp << " buffering is " << stream.enable_buffering;
+      
+      // Configuration validation
+      if (stream.max_buffer_frames < 1) {
+        BOOST_LOG_TRIVIAL(warning) << "maxBufferFrames must be >= 1, setting to 1 for stream " << stream.TGID;
+        stream.max_buffer_frames = 1;
+      }
+      if (stream.max_buffer_frames > 10) {
+        BOOST_LOG_TRIVIAL(warning) << "maxBufferFrames > 10 may cause memory issues, capping at 10 for stream " << stream.TGID;
+        stream.max_buffer_frames = 10;
+      }
+      
+      BOOST_LOG_TRIVIAL(info) << "simplestreamer will stream audio from TGID " <<stream.TGID << " on System " <<stream.short_name << " to " << stream.address <<" on port " << stream.port << " tcp is "<<stream.tcp << " buffering is " << stream.enable_buffering << " max_frames=" << stream.max_buffer_frames;
       streams.push_back(stream);
     }
     return 0;
@@ -211,41 +233,48 @@ class Simple_Stream : public Plugin_Api {
         BOOST_FOREACH (auto TGID, patched_talkgroups){
           if ((TGID==static_cast<long>(stream.TGID)) || stream.TGID==0){  //setting TGID to 0 in the config file will stream everything
             
-            // Check if this specific stream has buffering enabled
+            // BUFFERING LOGIC: Handle per-stream buffering for race condition mitigation
+            // This addresses the issue where audio_stream() is called before source ID propagation
             if (stream.enable_buffering) {
               std::string call_key = create_call_key(call) + "_" + std::to_string(stream.TGID);
               
-              // Initialize buffer if it doesn't exist
-              if (call_buffers.find(call_key) == call_buffers.end()) {
-                call_buffers[call_key] = call_buffer_t();
-                call_buffers[call_key].source_id_detected = false;
-                call_buffers[call_key].current_source_id = -1;
-                call_buffers[call_key].sending_started = false;
-                call_buffers[call_key].call_key = call_key;
-                call_buffers[call_key].last_activity = std::chrono::steady_clock::now();
+              // Thread-safe buffer access
+              std::lock_guard<std::mutex> lock(call_buffers_mutex);
+              
+              // Cache buffer lookup to avoid multiple map lookups
+              auto buffer_it = call_buffers.find(call_key);
+              if (buffer_it == call_buffers.end()) {
+                // Initialize buffer if it doesn't exist
+                call_buffer_t new_buffer;
+                new_buffer.source_id_detected = false;
+                new_buffer.current_source_id = -1;
+                new_buffer.sending_started = false;
+                new_buffer.call_key = call_key;
+                new_buffer.last_activity = std::chrono::steady_clock::now();
+                buffer_it = call_buffers.insert({call_key, new_buffer}).first;
               }
               
-              call_buffer_t &buffer = call_buffers[call_key];
+              call_buffer_t &buffer = buffer_it->second;
               buffer.last_activity = std::chrono::steady_clock::now(); // Update activity timestamp
               
-              // Check if source ID was just detected
+              // SOURCE ID DETECTION: Check if source ID was just detected for this buffer
               if (call_src != -1 && !buffer.source_id_detected) {
                 buffer.source_id_detected = true;
                 buffer.current_source_id = call_src;
                 BOOST_LOG_TRIVIAL(debug) << "Source ID detected for " << call_key << ": " << call_src;
                 
-                // Send all buffered frames with the detected source ID
+                // FLUSH BUFFER: Send all buffered frames with the detected source ID
                 send_buffered_frames(buffer, call_src, my_socket);
                 buffer.sending_started = true;
               }
               
-              // If we're still buffering and haven't started sending
+              // BUFFERING PHASE: If we're still waiting for source ID detection
               if (!buffer.sending_started) {
-                // Create audio frame for buffering
+                // BUFFER FRAME: Store audio frame for later transmission
                 audio_frame_t frame;
                 frame.samples = samples;
                 frame.sampleCount = sampleCount;
-                frame.source_id = call_src;
+                frame.source_id = call_src;  // May be -1 if source not yet detected
                 frame.call_short_name = call_short_name;
                 frame.call_tgid = call_tgid;
                 frame.call_freq = call_freq;
@@ -260,14 +289,14 @@ class Simple_Stream : public Plugin_Api {
                 
                 buffer.frames.push_back(frame);
                 
-                // Check if we've reached max buffer size
+                // BUFFER LIMIT CHECK: Prevent infinite buffering if source ID never detected
                 if (buffer.frames.size() >= static_cast<size_t>(stream.max_buffer_frames)) {
                   BOOST_LOG_TRIVIAL(debug) << "Max buffer size reached for " << call_key << ", sending with current source ID";
                   send_buffered_frames(buffer, call_src, my_socket);
                   buffer.sending_started = true;
                 }
                 
-                continue; // Skip sending this frame for this stream
+                continue; // Skip immediate sending for this stream (frame is buffered)
               }
             }
             
@@ -303,10 +332,21 @@ class Simple_Stream : public Plugin_Api {
             }
             send_buffer.push_back(buffer(samples, sampleCount*2));
             if(stream.tcp == true){
-              stream.tcp_socket->send(send_buffer);
+              try {
+                try {
+                  stream.tcp_socket->send(send_buffer);
+                } catch (const boost::system::system_error& e) {
+                  BOOST_LOG_TRIVIAL(error) << "TCP send error for stream " << stream.TGID << ": " << e.what();
+                }
+              } catch (const boost::system::system_error& e) {
+                BOOST_LOG_TRIVIAL(error) << "TCP send error for stream " << stream.TGID << ": " << e.what();
+              }
             }
             else{
               my_socket.send_to(send_buffer, stream.remote_endpoint, 0, error);
+              if (error) {
+                BOOST_LOG_TRIVIAL(error) << "UDP send error for stream " << stream.TGID << ": " << error.message();
+              }
             }
           }
         }
@@ -339,18 +379,22 @@ class Simple_Stream : public Plugin_Api {
       }
     }
     
+    // Populate talkgroup tags for all patched talkgroups (outside the stream loop)
+    std::vector<std::string> patched_talkgroup_tags;
+    if (patched_talkgroups.size() == 0){
+      patched_talkgroups.push_back(call_tgid);  //call_info.talkgroup may be negative - we cast stream.TGID to signed for comparison
+    }
+    BOOST_FOREACH (auto TGID, patched_talkgroups){
+      Talkgroup* this_tg = call_system->find_talkgroup(static_cast<unsigned long>(TGID));
+      if (this_tg != nullptr && !this_tg->alpha_tag.empty()) {
+        patched_talkgroup_tags.push_back(this_tg->alpha_tag);
+      }
+    }
+    
     BOOST_FOREACH (auto stream, streams){
       if (stream.sendJSON == true && stream.sendCallStart == true){
         if (0==stream.short_name.compare(call_short_name) || (0==stream.short_name.compare(""))){ //Check if shortName matches or is not specified
-          if (patched_talkgroups.size() == 0){
-            patched_talkgroups.push_back(call_tgid);  //call_info.talkgroup may be negative - we cast stream.TGID to signed for comparison
-          }
-          std::vector<std::string> patched_talkgroup_tags;
           BOOST_FOREACH (auto TGID, patched_talkgroups){
-            Talkgroup* this_tg = call_system->find_talkgroup(static_cast<unsigned long>(TGID));
-            if (this_tg != nullptr) {
-              patched_talkgroup_tags.push_back(this_tg->alpha_tag);
-            }
             if ((TGID==static_cast<long>(stream.TGID)) || stream.TGID==0){  //setting TGID to 0 in the config file will stream everything
               json json_object;
               std::string json_string;
@@ -374,7 +418,11 @@ class Simple_Stream : public Plugin_Api {
                 send_buffer.push_back(buffer(json_string));  //prepend json data
               }
               if(stream.tcp == true){
-                stream.tcp_socket->send(send_buffer);
+                try {
+                  stream.tcp_socket->send(send_buffer);
+                } catch (const boost::system::system_error& e) {
+                  BOOST_LOG_TRIVIAL(error) << "TCP send error for stream " << stream.TGID << ": " << e.what();
+                }
               }
               else{
                 my_socket.send_to(send_buffer, stream.remote_endpoint, 0, error);
@@ -388,11 +436,20 @@ class Simple_Stream : public Plugin_Api {
   }
 
   int call_end(Call_Data_t call_info) {
-    // Clean up any buffered frames for this call
-    std::string call_key = call_info.short_name + "_" + std::to_string(call_info.talkgroup) + "_" + std::to_string(call_info.call_num);
-    if (call_buffers.find(call_key) != call_buffers.end()) {
-      BOOST_LOG_TRIVIAL(debug) << "Clearing buffer for call: " << call_key;
-      call_buffers.erase(call_key);
+    // Clean up any buffered frames for this call (including stream-specific buffers)
+    std::string base_call_key = call_info.short_name + "_" + std::to_string(call_info.talkgroup) + "_" + std::to_string(call_info.call_num);
+    
+    // Thread-safe buffer cleanup
+    std::lock_guard<std::mutex> lock(call_buffers_mutex);
+    
+    // Remove all buffers that start with the base call key (handles stream-specific keys)
+    for (auto it = call_buffers.begin(); it != call_buffers.end();) {
+      if (it->first.find(base_call_key) == 0) {
+        BOOST_LOG_TRIVIAL(debug) << "Clearing buffer for call: " << it->first;
+        it = call_buffers.erase(it);
+      } else {
+        ++it;
+      }
     }
     
     boost::system::error_code error;
@@ -428,7 +485,11 @@ class Simple_Stream : public Plugin_Api {
                 send_buffer.push_back(buffer(json_string));  //prepend json data
               }
               if(stream.tcp == true){
-                stream.tcp_socket->send(send_buffer);
+                try {
+                  stream.tcp_socket->send(send_buffer);
+                } catch (const boost::system::system_error& e) {
+                  BOOST_LOG_TRIVIAL(error) << "TCP send error for stream " << stream.TGID << ": " << e.what();
+                }
               }
               else{
                 my_socket.send_to(send_buffer, stream.remote_endpoint, 0, error);
