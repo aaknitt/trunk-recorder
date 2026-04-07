@@ -86,7 +86,7 @@ void send_buffered_frames(call_buffer_t &buffer, long source_id, ip::udp::socket
           // This handles cases where frames were buffered with different source IDs
           long stream_source_id = (frame.source_id != -1) ? frame.source_id : source_id;
           std::vector<boost::asio::const_buffer> send_buffer;
-          
+          uint32_t json_length = 0
           if (stream.sendJSON == true) {
             json json_object = {
               {"src", stream_source_id},
@@ -102,7 +102,7 @@ void send_buffered_frames(call_buffer_t &buffer, long source_id, ip::udp::socket
             };
             
             std::string json_string = json_object.dump();
-            uint32_t json_length = json_string.length();
+            json_length = json_string.length();
             BOOST_LOG_TRIVIAL(debug) << "Sending buffered frame JSON: " << json_string;
             send_buffer.push_back(boost::asio::buffer(&json_length, 4));
             send_buffer.push_back(boost::asio::buffer(json_string));
