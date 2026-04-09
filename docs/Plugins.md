@@ -33,7 +33,7 @@ The [Built-in Plugins](#built-in-plugins) are compiled and installed when you se
 
 ##### Rdio Scanner Plugin
 
-**Name:** rdioscanner_uploader
+**Name:** rdioscanner_uploader  
 **Library:** librdioscanner_uploader.so
 
 This plugin makes it easy to connect Trunk Recorder with [Rdio Scanner](https://github.com/chuot/rdio-scanner). It uploads recordings and the information about them. The following additional settings are required:
@@ -45,27 +45,54 @@ This plugin makes it easy to connect Trunk Recorder with [Rdio Scanner](https://
 
 *Rdio Scanner System Object:*
 
-| Key       | Required | Default Value | Type   | Description                                                                                                                                                  |
-| --------- | :------: | ------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| systemId  |    ✓     |               | number | System ID for Rdio Scanner.                                                                                                                                  |
-| apiKey    |    ✓     |               | string | System-specific API key for uploading calls to Rdio Scanner. See the ApiKey section in the Rdio Scanner administrative dashboard for the value it should be. |
-| shortName |    ✓     |               | string | This should match the shortName of a system that is defined in the main section of the config file.                                                          |
+| Key             | Required | Default Value | Type  | Description                                                                                                                                                                                                 |
+| --------------- | :------: | ------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| systemId        |    ✓     |               | number | System ID for Rdio Scanner.                                                                                                                                                                                |
+| apiKey          |    ✓     |               | string | System-specific API key for uploading calls to Rdio Scanner. See the ApiKey section in the Rdio Scanner administrative dashboard for the value it should be.                                                |
+| shortName       |    ✓     |               | string | This should match the shortName of a system that is defined in the main section of the config file.                                                                                                         |
+| talkgroupAllow  |          | []            | array  | Optional allow-list of talkgroups to upload for this system. If set (non-empty), the talkgroup **must** match at least one pattern to be uploaded. Patterns are glob-style (supports `*` and `?`).        |
+| talkgroupDeny   |          | []            | array  | Optional deny-list of talkgroups to block upload for this system. If set (non-empty), any matching talkgroup will be skipped. Patterns are glob-style (supports `*` and `?`).                              |
 
+**Talkgroup filter rules (per-system):**
+- Talkgroup comparisons are done against the numeric talkgroup ID as a string (e.g. `50712`).
+- Patterns are glob-style:
+  - `*` matches any number of characters
+  - `?` matches a single character
+- If `talkgroupAllow` is provided and non-empty, the talkgroup must match at least one allow pattern (otherwise it is skipped).
+- If `talkgroupDeny` is provided and non-empty, the talkgroup must **not** match any deny pattern (otherwise it is skipped).
+- If both are provided, the allow check is applied first, then the deny check.
 
+**Examples:**
+- Allow only talkgroups starting with `507`:
+  - `talkgroupAllow: ["507*"]`
+- Allow only 5-digit talkgroups starting with `12` (uses `?`):
+  - `talkgroupAllow: ["12???"]`
+- Block a specific talkgroup:
+  - `talkgroupDeny: ["12345"]`
+- Block a prefix/range while allowing others:
+  - `talkgroupDeny: ["99*"]`
+- Block a specific “slot” pattern using `?`:
+  - `talkgroupDeny: ["507?9"]`
 
 ##### Example Plugin Object:
 
-```yaml
-        {
-          "name": "rdioscanner_uploader",
-          "library": "librdioscanner_uploader.so",
-          "server": "http://127.0.0.1",
-          "systems": [{
-                  "shortName": "test",
-                  "apiKey": "fakekey",
-                  "systemId": 411
-          }
+```json
+{
+  "name": "rdioscanner_uploader", 
+  "library": "librdioscanner_uploader.so", 
+  "server": "http://127.0.0.1", 
+  "systems": [
+    {
+      "shortName": "test", 
+      "apiKey": "fakekey", 
+      "systemId": 411, 
+      "talkgroupAllow": ["507*", "12???"], 
+      "talkgroupDeny": ["507?9", "12345"]
+    }
+  ]
+}
 ```
+
 
 ##### simplestream Plugin
 
@@ -190,11 +217,11 @@ Community plugins can extend the features of Trunk Recorder and allow customized
 > As new plugins are developed, authors are encouraged to add to the below tables by submitting a PR to this document.
 
 #### External Plugins
-Plugins that are built out-of-tree and installed seperately from Trunk Recorder:
+Plugins that are built out-of-tree and installed separately from Trunk Recorder:
 | Plugin Name / Link                                                                              | Description                                                                                                               |
 | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| [MQTT Status](https://github.com/robotastic/trunk-recorder-mqtt-status)                         | Publishes the current status of a Trunk Recorder instance over MQTT                                                       |
-| [MQTT Statistics](https://github.com/robotastic/trunk-recorder-mqtt-statistics)                 | Publishes statistics about a Trunk Recorder instance over MQTT                                                            |
+| [MQTT Status](https://github.com/TrunkRecorder/trunk-recorder-mqtt-status)                         | Publishes the current status of a Trunk Recorder instance over MQTT                                                       |
+| [MQTT Statistics](https://github.com/TrunkRecorder/trunk-recorder-mqtt-statistics)                 | Publishes statistics about a Trunk Recorder instance over MQTT                                                            |
 | [Decode rates logger](https://github.com/rosecitytransit/trunk-recorder-decode-rate)            | Logs trunking control channel decode rates to a CSV file, and includes a PHP file that outputs an SVG graph               |
 | [Daily call log and live Web page](https://github.com/rosecitytransit/trunk-recorder-daily-log) | Creates a daily log of calls (instead of just individual JSON files) and includes an updating PHP Web page w/audio player |
 | [Prometheus exporter](https://github.com/USA-RedDragon/trunk-recorder-prometheus)               | Publishes statistics to a metrics endpoint via HTTP                                                                       |
@@ -220,7 +247,7 @@ cd /user_plugins
 git submodule add https://github.com/tr_plugin_developer/my-tr-plugin.git
 ```
 
-2. Review plugin requrements, and ensure all dependencies have been met.
+2. Review plugin requirements, and ensure all dependencies have been met.
 
 3. Return to your 'build' directory, and resume from the `cmake` step: e.g.
 ```bash
@@ -232,7 +259,7 @@ cmake ../trunk-recorder
 -- Added user plugin: my-tr-plugin
 ```
 
-4. Contine to build and install Trunk Recorder with included plugins:
+4. Continue to build and install Trunk Recorder with included plugins:
 ```bash
 make
 sudo make install

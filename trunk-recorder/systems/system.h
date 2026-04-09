@@ -53,6 +53,42 @@ public:
   virtual void set_upload_script(std::string script) = 0;
   virtual bool get_compress_wav() = 0;
   virtual void set_compress_wav(bool compress) = 0;
+  virtual std::string get_audio_bitrate() = 0;
+  virtual void set_audio_bitrate(std::string bitrate) = 0;
+
+  virtual bool get_audio_postprocess_enabled() = 0;
+  virtual void set_audio_postprocess_enabled(bool enabled) = 0;
+
+  virtual int get_audio_highpass_hz() = 0;
+  virtual void set_audio_highpass_hz(int hz) = 0;
+
+  virtual int get_audio_lowpass_hz() = 0;
+  virtual void set_audio_lowpass_hz(int hz) = 0;
+
+  virtual int get_audio_bandreject_hz() = 0;
+  virtual void set_audio_bandreject_hz(int hz) = 0;
+
+  virtual int get_audio_bandreject_width_hz() = 0;
+  virtual void set_audio_bandreject_width_hz(int hz) = 0;
+
+  virtual bool get_audio_loudnorm() = 0;
+  virtual void set_audio_loudnorm(bool enabled) = 0;
+
+  virtual bool get_audio_loudnorm_two_pass() = 0;
+  virtual void set_audio_loudnorm_two_pass(bool enabled) = 0;
+
+  virtual double get_audio_loudnorm_i() = 0;
+  virtual void set_audio_loudnorm_i(double value) = 0;
+
+  virtual double get_audio_loudnorm_tp() = 0;
+  virtual void set_audio_loudnorm_tp(double value) = 0;
+
+  virtual double get_audio_loudnorm_lra() = 0;
+  virtual void set_audio_loudnorm_lra(double value) = 0;
+
+  virtual std::string get_audio_ffmpeg_filter() = 0;
+  virtual void set_audio_ffmpeg_filter(std::string filter) = 0;
+
   virtual std::string get_api_key() = 0;
   virtual void set_api_key(std::string api_key) = 0;
   virtual std::string get_bcfy_api_key() = 0;
@@ -119,10 +155,15 @@ public:
   virtual Talkgroup *find_talkgroup(long tg) = 0;
   virtual Talkgroup *find_talkgroup_by_freq(double freq) = 0;
   virtual std::string find_unit_tag(long unitID) = 0;
+  virtual std::string find_unit_tag_ota(long unitID) = 0;
   virtual void set_talkgroups_file(std::string) = 0;
   virtual void set_channel_file(std::string channel_file) = 0;
   virtual bool has_channel_file() = 0;
   virtual void set_unit_tags_file(std::string) = 0;
+  virtual void set_unit_tags_ota_file(std::string) = 0;
+  virtual std::string get_unit_tags_ota_file() = 0;
+  virtual void set_unit_tags_mode(std::string mode) = 0;
+  virtual std::string get_unit_tags_mode() = 0;
   virtual void set_custom_freq_table_file(std::string custom_freq_table_file) = 0;
   virtual std::string get_custom_freq_table_file() = 0;
   virtual bool has_custom_freq_table_file() = 0;
@@ -147,6 +188,8 @@ public:
   virtual std::vector<double> get_channels() = 0;
   virtual std::vector<double> get_control_channels() = 0;
   virtual std::vector<Talkgroup *> get_talkgroups() = 0;
+  virtual std::vector<UnitTag *> get_unit_tags() = 0;
+  virtual std::vector<UnitTagOTA *> get_unit_tags_ota() = 0;
   virtual void set_bandplan(std::string) = 0;
   virtual std::string get_bandplan() = 0;
   virtual void set_bandfreq(int) = 0;
@@ -164,9 +207,16 @@ public:
 
   virtual bool get_hideEncrypted() = 0;
   virtual void set_hideEncrypted(bool hideEncrypted) = 0;
+  virtual bool get_monitorEncrypted() = 0;
+  virtual void set_monitorEncrypted(bool monitorEncrypted) = 0;
 
   virtual bool get_hideUnknown() = 0;
   virtual void set_hideUnknown(bool hideUnknown) = 0;
+
+  virtual int get_freq_error() = 0;
+  virtual void finetune_control_freq(double f) = 0;
+  virtual int get_autotune_offset() = 0;
+  virtual void set_autotune_offset(int offset) = 0;
 
   virtual boost::property_tree::ptree get_stats() = 0;
   virtual boost::property_tree::ptree get_stats_current(float timeDiff) = 0;
@@ -186,5 +236,7 @@ public:
   virtual unsigned long get_multiSiteSystemNumber() = 0;
   virtual void set_multiSiteSystemNumber(unsigned long multiSiteSystemName) = 0;
 
+  virtual std::string get_filename_format() = 0;
+  virtual void set_filename_format(std::string format) = 0;
 };
 #endif

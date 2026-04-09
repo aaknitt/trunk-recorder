@@ -2,6 +2,10 @@
 #include "p25_recorder_decode.h"
 #include "../gr_blocks/plugin_wrapper_impl.h"
 #include "../plugin_manager/plugin_manager.h"
+#include "../systems/system_impl.h"
+#include "../formatter.h"
+#include "../unit_tags_ota.h"
+#include <chrono>
 
 p25_recorder_decode_sptr make_p25_recorder_decode(Recorder *recorder, int silence_frames, bool d_soft_vocoder) {
   p25_recorder_decode *decoder = new p25_recorder_decode(recorder);
@@ -92,12 +96,13 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
   const char *udp_host = "127.0.0.1";
   bool do_imbe = 1;
   bool do_output = 1;
-  bool do_msgq = 0;
+  bool do_msgq = 1;
   bool do_audio_output = 1;
   bool do_tdma = 0;
   bool do_nocrypt = 1;
 
   op25_frame_assembler = gr::op25_repeater::p25_frame_assembler::make(silence_frames, d_soft_vocoder, udp_host, udp_port, verbosity, do_imbe, do_output, do_msgq, rx_queue, do_audio_output, do_tdma, do_nocrypt);
+  op25_frame_assembler->set_voice_codec_callback(voice_codec_cb_handler, this);
   levels = gr::blocks::multiply_const_ss::make(1);
 
   if (use_streaming) {
@@ -117,6 +122,13 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
 void p25_recorder_decode::plugin_callback_handler(int16_t *samples, int sampleCount) {
   if (d_call) {
     plugman_audio_callback(d_call, d_recorder, samples, sampleCount);
+  }
+}
+
+void p25_recorder_decode::voice_codec_cb_handler(int codec_type, long tgid, uint32_t src_id, const uint32_t *params, int param_count, int errs, void *user_data) {
+  p25_recorder_decode *self = static_cast<p25_recorder_decode *>(user_data);
+  if (self->d_call) {
+    plugman_voice_codec_data(self->d_call, codec_type, tgid, src_id, params, param_count, errs);
   }
 }
 
@@ -143,4 +155,176 @@ void p25_recorder_decode::reset() {
 
 gr::op25_repeater::p25_frame_assembler::sptr p25_recorder_decode::get_transmission_sink() {
   return op25_frame_assembler;
+}
+
+void p25_recorder_decode::handle_alias_message(const nlohmann::json& j) {
+  int messages = j.contains("messages") ? j["messages"].get<int>() : 0;
+  std::array<std::vector<uint8_t>, 10> alias_buffer;
+  
+  // Decode hex strings back to binary (all formats use blocks)
+  if (j.contains("blocks")) {
+    for (auto& [key, value] : j["blocks"].items()) {
+      int idx = std::stoi(key);
+      if (idx >= 0 && idx < 10) {
+        std::string hex_str = value.get<std::string>();
+        alias_buffer[idx].clear();
+        alias_buffer[idx].reserve(hex_str.length() / 2);
+        for (size_t i = 0; i + 1 < hex_str.length(); i += 2) {
+          uint8_t byte = static_cast<uint8_t>(std::stoul(hex_str.substr(i, 2), nullptr, 16));
+          alias_buffer[idx].push_back(byte);
+        }
+      }
+    }
+  }
+  
+  OTAAlias result;
+  if (j["type"] == "motorola_alias_p1") {
+    result = UnitTagsOTA::decode_motorola_alias(alias_buffer, messages);
+  } else if (j["type"] == "motorola_alias_p2") {
+    result = UnitTagsOTA::decode_motorola_alias_p2(alias_buffer, messages);
+  } else if (j["type"] == "harris_alias_p1") {
+    System *sys = d_call->get_system();
+    std::string wacn = sys ? std::to_string(sys->get_wacn()) : "";
+    std::string sys_id = sys ? std::to_string(sys->get_sys_id()) : "";
+    
+    long unit_id = -1;
+    long talkgroup = -1;
+    
+    // Get OP25-captured IDs
+    if (j.contains("op25_src_id") && j.contains("op25_grp_id")) {
+      unit_id = j["op25_src_id"].get<long>();
+      talkgroup = j["op25_grp_id"].get<long>();
+    }
+    
+    // Check cache age - if IDs were cached too long ago, they may be stale
+    // This handles the case where message queue processing is delayed
+    if (j.contains("cache_age_ms")) {
+      long cache_age = j["cache_age_ms"].get<long>();
+      long cache_threshold = 300;
+      // If cache is older, the IDs may be from a previous transmission
+      if (cache_age > cache_threshold) {
+        BOOST_LOG_TRIVIAL(debug) << "Harris P1 alias deferred - cache too old (" 
+                                  << cache_age << "ms > " << cache_threshold << "ms threshold)";
+        return;  // Skip and wait for retransmission with fresher IDs
+      }
+    }
+
+    // Check that the alias matches the current call to avoid applying an alias that may have been captured
+    // in advance of decoding the new unit ID in back-to-back transmissions
+    long call_talkgroup = d_call->get_talkgroup();
+    long call_src_id = d_call->get_current_source_id();
+    if (talkgroup != call_talkgroup || call_src_id != unit_id) {
+      BOOST_LOG_TRIVIAL(debug) << "Harris P2 alias deferred - talkgroup/id mismatch (OP25 cache=" 
+                               << talkgroup << ", call TG=" << call_talkgroup << " src=" << unit_id << ", call ID=" << call_src_id << ")";
+      return;  // Skip and wait for retransmission with IDs matching current call
+    }
+    
+    if (unit_id <= 0 || talkgroup <= 0) {
+      BOOST_LOG_TRIVIAL(debug) << "Harris P1 alias deferred - OP25 cache not yet populated (src=" 
+                               << unit_id << ", grp=" << talkgroup << ")";
+      return;  // Skip and wait for retransmission with valid cached IDs
+    }
+    
+    BOOST_LOG_TRIVIAL(debug) << "Harris P1 using OP25-cached IDs: src=" << unit_id << ", grp=" << talkgroup;
+    
+    result = UnitTagsOTA::decode_harris_alias(alias_buffer, unit_id, talkgroup, wacn, sys_id);
+  } else if (j["type"] == "harris_alias_p2") {
+    System *sys = d_call->get_system();
+    std::string wacn = sys ? std::to_string(sys->get_wacn()) : "";
+    std::string sys_id = sys ? std::to_string(sys->get_sys_id()) : "";
+    
+    long unit_id = -1;
+    long talkgroup = -1;
+    
+    // Get OP25-captured IDs
+    if (j.contains("op25_src_id") && j.contains("op25_grp_id")) {
+      unit_id = j["op25_src_id"].get<long>();
+      talkgroup = j["op25_grp_id"].get<long>();
+    }
+    
+    // Check cache age - if IDs were cached too long ago, they may be stale
+    // This handles the case where message queue processing is delayed
+    if (j.contains("cache_age_ms")) {
+      long cache_age = j["cache_age_ms"].get<long>();
+      long cache_threshold = 300;
+      // If cache is older, the IDs may be from a previous transmission
+      if (cache_age > cache_threshold) {
+        BOOST_LOG_TRIVIAL(debug) << "Harris P2 alias deferred - cache too old (" 
+                                  << cache_age << "ms > " << cache_threshold << "ms threshold)";
+        return;  // Skip and wait for retransmission with fresher IDs
+      }
+    }
+
+    // Check that the alias matches the current call to avoid applying an alias that may have been captured
+    // in advance of decoding the new unit ID in back-to-back transmissions
+    long call_talkgroup = d_call->get_talkgroup();
+    long call_src_id = d_call->get_current_source_id();
+    if (talkgroup != call_talkgroup || call_src_id != unit_id) {
+      BOOST_LOG_TRIVIAL(debug) << "Harris P2 alias deferred - talkgroup/id mismatch (OP25 cache=" 
+                               << talkgroup << ", call TG=" << call_talkgroup << " src=" << unit_id << ", call ID=" << call_src_id << ")";
+      return;  // Skip and wait for retransmission with IDs matching current call
+    }
+    
+    if (unit_id <= 0 || talkgroup <= 0) {
+      BOOST_LOG_TRIVIAL(debug) << "Harris P2 alias deferred - OP25 cache not yet populated (src=" 
+                               << unit_id << ", grp=" << talkgroup << ")";
+      return;  // Skip and wait for retransmission with valid cached IDs
+    }
+    
+    BOOST_LOG_TRIVIAL(debug) << "Harris P2 using OP25-cached IDs: src=" << unit_id << ", grp=" << talkgroup;
+    
+    result = UnitTagsOTA::decode_harris_alias_p2(alias_buffer, unit_id, talkgroup, wacn, sys_id);
+  }
+  
+  if (result.success && !result.alias.empty()) {
+    std::string loghdr = log_header(d_call->get_short_name(),d_call->get_call_num(),d_call->get_talkgroup_display(),d_call->get_freq());
+    
+    BOOST_LOG_TRIVIAL(debug) << loghdr << "Alias OTA: " << result.radio_id << " = \"" << result.alias << "\" [" << result.source << "]";
+    
+    System *sys = d_call->get_system();
+    if (sys) {
+      System_impl *sys_impl = dynamic_cast<System_impl*>(sys);
+      if (sys_impl && sys_impl->unit_tags) {
+        bool added = sys_impl->unit_tags->add_ota(result);
+        if (added) {
+          BOOST_LOG_TRIVIAL(info) << loghdr << Color::BMAG << "New " << result.source << " alias: " << Color::RST 
+                                  << result.radio_id << " (" << Color::BLU << result.alias << Color::RST << ")"; 
+        } else {
+          BOOST_LOG_TRIVIAL(debug) << loghdr << "Alias for " << result.radio_id << " already exists";
+        }
+      }
+    }
+  }
+}
+
+void p25_recorder_decode::check_message_queue() {
+  if (!rx_queue || !d_call) {
+    return;
+  }
+
+  gr::message::sptr msg;
+  while ((msg = rx_queue->delete_head_nowait())) {
+    long msg_type = msg->type();
+    
+    if (msg_type == -3) { // M_P25_JSON_DATA
+      std::string msg_str(msg->to_string());
+      
+      try {
+        auto j = nlohmann::json::parse(msg_str);
+        
+        if (j.contains("type")) {
+          std::string json_msg_type = j["type"];
+          
+          if (json_msg_type == "motorola_alias_p1" || json_msg_type == "motorola_alias_p2" ||
+              json_msg_type == "harris_alias_p1" || json_msg_type == "harris_alias_p2") {
+            handle_alias_message(j);
+          }
+          // Add some more JSON handlers as we find other things to decode!
+        }
+        
+      } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(debug) << "Malformed P25 JSON message: " << e.what();
+      }
+    }
+  }
 }

@@ -35,6 +35,7 @@
 #include "p25_crypt_algs.h"
 #include "op25_audio.h"
 #include "log_ts.h"
+#include "imbe_vocoder/imbe_vocoder.h"
 
 #include "ezpwd/rs"
 
@@ -42,7 +43,7 @@
 class p25p2_tdma
 {
 public:
-	p25p2_tdma(const op25_audio& udp, log_ts& logger, int slotid, int debug, bool do_msgq, gr::msg_queue::sptr queue, std::deque<int16_t> &qptr, bool do_audio_output, int msgq_id = 0) ;	// constructor
+	p25p2_tdma(const op25_audio& udp, log_ts& logger, int slotid, int debug, bool do_msgq, gr::msg_queue::sptr queue, std::deque<int16_t> &qptr, bool do_audio_output, bool soft_vocoder, int msgq_id = 0) ;	// constructor
 	int handle_packet(uint8_t dibits[], const uint64_t fs) ;
 	void set_slotid(int slotid);
 	void call_end();
@@ -77,14 +78,20 @@ private:
 	int mbe_err_cnt;
 	bool tone_frame;
 	software_imbe_decoder software_decoder;
+	imbe_vocoder vocoder;
 	gr::msg_queue::sptr d_msg_queue;
 	std::deque<int16_t> &output_queue_decode;
 	bool d_do_msgq;
 	int d_msgq_id;
 	bool d_do_audio_output;
+	bool d_soft_vocoder;
 	std::pair<bool,long> terminate_call;
 	long src_id;
 	long grp_id;
+	long cached_src_id;
+	long cached_grp_id;
+	uint64_t cached_id_timestamp;
+	std::array<std::vector<uint8_t>, 10> alias_buffer;
 	const op25_audio& op25audio;
     log_ts& logts;
     int d_nac;
@@ -124,5 +131,12 @@ private:
     inline void reset_ess() { ess_algid = 0x80; memset(ess_mi, 0, sizeof(ess_mi)); }
 
 	void send_msg(const std::string msg_str, long msg_type);
+
+	typedef void (*voice_codec_cb_t)(int codec_type, long tgid, uint32_t src_id, const uint32_t *params, int param_count, int errs, void *user_data);
+	voice_codec_cb_t voice_codec_cb_;
+	void *voice_codec_cb_data_;
+
+public:
+	void set_voice_codec_callback(voice_codec_cb_t cb, void *user_data) { voice_codec_cb_ = cb; voice_codec_cb_data_ = user_data; }
 };
 #endif /* INCLUDED_P25P2_TDMA_H */

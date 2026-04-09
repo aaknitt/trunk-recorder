@@ -52,7 +52,7 @@
 
 #include "./setup_systems.h"
 #include "monitor_systems.h"
-#include "systems/smartnet_trunking.h"
+#include "systems/smartnet_impl.h"
 #include "systems/system.h"
 #include "systems/system_impl.h"
 
@@ -79,6 +79,7 @@ namespace sinks = boost::log::sinks;
 std::vector<Source *> sources;
 std::vector<System *> systems;
 std::vector<Call *> calls;
+std::vector<Call *> monitored_calls;
 
 gr::top_block_sptr tb;
 

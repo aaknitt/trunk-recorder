@@ -35,6 +35,7 @@
 
 #include "check_frame_sync.h"
 
+#include "imbe_decoder.h"
 #include "p25p2_vf.h"
 #include "mbelib.h"
 #include "ambe.h"
@@ -219,7 +220,7 @@ void rx_sync::ysf_sync(const uint8_t dibitbuf[], bool& ysf_fullrate, bool& unmut
 		fprintf(stderr, "%s ysf_sync: muting audio: dt: %d, rc: %d\n", logts.get(d_msgq_id), d_shift_reg, rc);
 }
 
-rx_sync::rx_sync(const char * options, log_ts& logger, int debug, int msgq_id, gr::msg_queue::sptr queue, std::array<std::deque<int16_t>, 2> &output_queue) :	// constructor
+rx_sync::rx_sync(const char * options, log_ts& logger, int debug, int msgq_id, gr::msg_queue::sptr queue, std::array<std::deque<int16_t>, 2> &output_queue, bool d_soft_vocoder) :	// constructor
 	sync_timer(op25_timer(1000000)),
 	d_symbol_count(0),
 	d_sync_reg(0),
@@ -231,15 +232,18 @@ rx_sync::rx_sync(const char * options, log_ts& logger, int debug, int msgq_id, g
 	d_slot_mask(3),
 	d_slot_key(0),
 	output_queue(output_queue),
-	p25fdma(d_audio, logger, debug, true, false, true, queue, d_output_queue[0], true, msgq_id),
-	p25tdma(d_audio, logger, 0, debug, true, queue, d_output_queue[0], true, msgq_id),
+	p25fdma(d_audio, logger, debug, true, false, true, queue, d_output_queue[0], true, d_soft_vocoder, msgq_id),
+	p25tdma(d_audio, logger, 0, debug, true, queue, d_output_queue[0], true, d_soft_vocoder, msgq_id),
+	d_soft_vocoder(d_soft_vocoder),
 	dmr(logger, debug, msgq_id, queue),
 	d_msgq_id(msgq_id),
 	d_msg_queue(queue),
 	d_stereo(true),
 	d_debug(debug),
 	d_audio(options, debug),
-	logts(logger)
+	logts(logger),
+	voice_codec_cb_(NULL),
+	voice_codec_cb_data_(NULL)
 {
 	if (msgq_id >= 0)
 		d_stereo = false; // single channel audio for trunking
@@ -257,6 +261,13 @@ rx_sync::rx_sync(const char * options, log_ts& logger, int debug, int msgq_id, g
 
 rx_sync::~rx_sync()	// destructor
 {
+}
+
+void rx_sync::set_voice_codec_callback(voice_codec_cb_t cb, void *user_data) {
+	voice_codec_cb_ = cb;
+	voice_codec_cb_data_ = user_data;
+	p25fdma.set_voice_codec_callback(cb, user_data);
+	p25tdma.set_voice_codec_callback(cb, user_data);
 }
 
 void rx_sync::sync_timeout(rx_types proto)
@@ -386,6 +397,12 @@ void rx_sync::codeword(const uint8_t* cw, const enum codeword_types codeword_typ
 			do_tone = false;
 			do_silence = true;
 		}
+		if (voice_codec_cb_) {
+			uint32_t params[4] = {(uint32_t)U[0], (uint32_t)U[1], (uint32_t)U[2], (uint32_t)U[3]};
+			voice_codec_cb_(2 /*CODEC_DMR_AMBE*/, 0,
+			                (src_id[slot_id] > 0) ? (uint32_t)src_id[slot_id] : 0,
+			                params, 4, (int)errs, voice_codec_cb_data_);
+		}
 		break;
 	case CODEWORD_DSTAR:
 		interleaver.decode_dstar(cw, b, false);
@@ -393,6 +410,11 @@ void rx_sync::codeword(const uint8_t* cw, const enum codeword_types codeword_typ
 			mbe_dequantizeAmbe2400Parms(&cur_mp[slot_id], &prev_mp[slot_id], &errs_mp[slot_id], b);
 		else
 			do_silence = true;
+		if (voice_codec_cb_) {
+			uint32_t params[9];
+			for (int i = 0; i < 9; i++) params[i] = (uint32_t)b[i];
+			voice_codec_cb_(3 /*CODEC_DSTAR_AMBE*/, 0, 0, params, 9, 0, voice_codec_cb_data_);
+		}
 		break;
 	case CODEWORD_YSF_HALFRATE:	// 104 bits
 		for (int i=0; i<x; i++) {
@@ -409,6 +431,11 @@ void rx_sync::codeword(const uint8_t* cw, const enum codeword_types codeword_typ
 			mbe_dequantizeAmbe2250Parms(&cur_mp[slot_id], &prev_mp[slot_id], &errs_mp[slot_id], b);
 		else
 			do_silence = true;
+		if (voice_codec_cb_) {
+			uint32_t params[9];
+			for (int i = 0; i < 9; i++) params[i] = (uint32_t)b[i];
+			voice_codec_cb_(5 /*CODEC_YSF_HALFRATE*/, 0, 0, params, 9, 0, voice_codec_cb_data_);
+		}
 		break;
 	case CODEWORD_P25P2:
 		break; // Not used; handled by p25p2_tdma
@@ -418,34 +445,47 @@ void rx_sync::codeword(const uint8_t* cw, const enum codeword_types codeword_typ
 		for (int i=0; i<144; i++)
 			fullrate_cw[i] = cw[ysf_permutation[i]];
 		imbe_header_decode(fullrate_cw, u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], E0, ET);
+		if (voice_codec_cb_) {
+			voice_codec_cb_(4 /*CODEC_YSF_FULLRATE*/, 0, 0, u, 8, 0, voice_codec_cb_data_);
+		}
 		do_fullrate = true;
 		break;
 	}
+	int16_t samp_buf[IMBE_SAMPLES_PER_FRAME];
+
 	if (do_tone) {
-		d_software_decoder[slot_id].decode_tone(tone_mp[slot_id].ID, tone_mp[slot_id].AD, &tone_mp[slot_id].n);
+		d_software_decoder[slot_id].decode_tone(samp_buf, tone_mp[slot_id].ID, tone_mp[slot_id].AD, &tone_mp[slot_id].n);
 	} else {
 		mbe_moveMbeParms (&cur_mp[slot_id], &prev_mp[slot_id]);
 		if (do_fullrate) {
-			d_software_decoder[slot_id].decode(fullrate_cw);
+			if (d_soft_vocoder) {
+				d_software_decoder[slot_id].decode(samp_buf, fullrate_cw);
+			} else {
+				int16_t frame_vector[8];
+
+                for (int i=0; i < 8; i++) {
+                    frame_vector[i] = u[i];
+                }
+                frame_vector[7] >>= 1;
+                d_imbe_vocoder[slot_id].imbe_decode(frame_vector, samp_buf);
+			}
 		} else {	/* halfrate */
 			if (!do_silence) {
-				d_software_decoder[slot_id].decode_tap(cur_mp[slot_id].L, 0, cur_mp[slot_id].w0, &cur_mp[slot_id].Vl[1], &cur_mp[slot_id].Ml[1]);
+				if (d_soft_vocoder) {
+					d_software_decoder[slot_id].decode_tap(samp_buf, cur_mp[slot_id].L, 0, cur_mp[slot_id].w0, &cur_mp[slot_id].Vl[1], &cur_mp[slot_id].Ml[1]);
+				} else {
+					d_imbe_vocoder[slot_id].decode_tap(samp_buf, cur_mp[slot_id].L, cur_mp[slot_id].w0, &cur_mp[slot_id].Vl[1], &cur_mp[slot_id].Ml[1]);
+				}
 			}
 		}
 	}
-	audio_samples *samples = d_software_decoder[slot_id].audio();
 	float snd;
-	int16_t samp_buf[NSAMP_OUTPUT];
 	for (int i=0; i < NSAMP_OUTPUT; i++) {
-		if ((!do_silence) && samples->size() > 0) {
-			snd = samples->front();
-			samples->pop_front();
+		if (do_silence) {
+			snd = 0.0f;
 		} else {
-			snd = 0;
+			snd = samp_buf[i];
 		}
-		if (do_fullrate)
-			snd *= 32768.0;
-		samp_buf[i] = snd;
 		output_queue[slot_id].push_back(snd);
 	}
 	//output(samp_buf, slot_id);
@@ -474,6 +514,21 @@ int rx_sync::get_src_id(int slot) {
 	return -1;
 }
 
+int rx_sync::get_dst_id(int slot) {
+	if ((slot == 0) || (slot == 1)) {
+		return dmr.get_dst_id(slot);
+	}
+	fprintf(stderr, "Error, Slot given is not 0 or 1\n");
+	return -1;
+}
+
+int rx_sync::get_cc(int slot) {
+	if ((slot == 0) || (slot == 1)) {
+		return dmr.get_cc(slot);
+	}
+	fprintf(stderr, "Error, Slot given is not 0 or 1\n");
+	return -1;
+}
 
 void rx_sync::rx_sym(const uint8_t sym)
 {

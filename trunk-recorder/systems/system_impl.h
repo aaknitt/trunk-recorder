@@ -8,7 +8,8 @@
 //#include "../source.h"
 #include "p25_trunking.h"
 #include "parser.h"
-#include "smartnet_trunking.h"
+//#include "smartnet_trunking.h"
+#include "smartnet_impl.h"
 #include "system.h"
 
 #ifdef __GNUC__
@@ -59,6 +60,8 @@ public:
   std::string talkgroups_file;
   std::string channel_file;
   std::string unit_tags_file;
+  std::string unit_tags_ota_file;
+  std::string unit_tags_mode;
   std::string custom_freq_table_file;
   std::string short_name;
   std::string api_key;
@@ -66,6 +69,7 @@ public:
   std::string default_mode;
   std::string system_type;
   std::string upload_script;
+  std::string filename_format;
   int bcfy_system_id;
   int message_count;
   int decode_rate;
@@ -83,12 +87,24 @@ public:
   double max_call_duration;
   double min_transmission_duration;
   bool compress_wav;
+  std::string audio_bitrate;
   bool conversation_mode;
   bool qpsk_mod;
   double squelch_db;
   float tau;
   double analog_levels;
   double digital_levels;
+  bool audio_postprocess_enabled;
+  int audio_highpass_hz;
+  int audio_lowpass_hz;
+  int audio_bandreject_hz;
+  int audio_bandreject_width_hz;
+  bool audio_loudnorm;
+  bool audio_loudnorm_two_pass;
+  double audio_loudnorm_i;
+  double audio_loudnorm_tp;
+  double audio_loudnorm_lra;
+  std::string audio_ffmpeg_filter;
 
   unsigned xor_mask_len;
   const char *xor_mask;
@@ -104,7 +120,7 @@ public:
   bool record_unknown;
   bool call_log;
 
-  smartnet_trunking_sptr smartnet_trunking;
+  smartnet_impl::sptr smartnet_trunking;
   p25_trunking_sptr p25_trunking;
 
   std::map<unsigned long, std::map<unsigned long, std::time_t>> talkgroup_patches;
@@ -115,6 +131,42 @@ public:
   void set_upload_script(std::string script) override;
   bool get_compress_wav() override;
   void set_compress_wav(bool compress) override;
+  std::string get_audio_bitrate() override;
+  void set_audio_bitrate(std::string bitrate) override;
+
+  bool get_audio_postprocess_enabled() override;
+  void set_audio_postprocess_enabled(bool enabled) override;
+
+  int get_audio_highpass_hz() override;
+  void set_audio_highpass_hz(int hz) override;
+
+  int get_audio_lowpass_hz() override;
+  void set_audio_lowpass_hz(int hz) override;
+
+  int get_audio_bandreject_hz() override;
+  void set_audio_bandreject_hz(int hz) override;
+
+  int get_audio_bandreject_width_hz() override;
+  void set_audio_bandreject_width_hz(int hz) override;
+
+  bool get_audio_loudnorm() override;
+  void set_audio_loudnorm(bool enabled) override;
+
+  bool get_audio_loudnorm_two_pass() override;
+  void set_audio_loudnorm_two_pass(bool enabled) override;
+
+  double get_audio_loudnorm_i() override;
+  void set_audio_loudnorm_i(double value) override;
+
+  double get_audio_loudnorm_tp() override;
+  void set_audio_loudnorm_tp(double value) override;
+
+  double get_audio_loudnorm_lra() override;
+  void set_audio_loudnorm_lra(double value) override;
+
+  std::string get_audio_ffmpeg_filter() override;
+  void set_audio_ffmpeg_filter(std::string filter) override;
+
   std::string get_api_key() override;
   void set_api_key(std::string api_key) override;
   std::string get_bcfy_api_key() override;
@@ -181,10 +233,15 @@ public:
   Talkgroup *find_talkgroup(long tg) override;
   Talkgroup *find_talkgroup_by_freq(double freq) override;
   std::string find_unit_tag(long unitID) override;
+  std::string find_unit_tag_ota(long unitID) override;
   void set_talkgroups_file(std::string) override;
   void set_channel_file(std::string channel_file) override;
   bool has_channel_file() override;
   void set_unit_tags_file(std::string) override;
+  void set_unit_tags_ota_file(std::string) override;
+  std::string get_unit_tags_ota_file() override;
+  void set_unit_tags_mode(std::string mode) override;
+  std::string get_unit_tags_mode() override;
   void set_custom_freq_table_file(std::string custom_freq_table_file) override;
   std::string get_custom_freq_table_file() override;
   bool has_custom_freq_table_file() override;
@@ -209,6 +266,8 @@ public:
   std::vector<double> get_channels() override;
   std::vector<double> get_control_channels() override;
   std::vector<Talkgroup *> get_talkgroups() override;
+  std::vector<UnitTag *> get_unit_tags() override;
+  std::vector<UnitTagOTA *> get_unit_tags_ota() override;
   gr::msg_queue::sptr msg_queue;
   System_impl(int sys_id);
   void set_bandplan(std::string) override;
@@ -228,9 +287,16 @@ public:
 
   bool get_hideEncrypted() override;
   void set_hideEncrypted(bool hideEncrypted) override;
+  bool get_monitorEncrypted() override;
+  void set_monitorEncrypted(bool monitorEncrypted) override;
 
   bool get_hideUnknown() override;
   void set_hideUnknown(bool hideUnknown) override;
+
+  int get_freq_error() override;
+  void finetune_control_freq(double f) override;
+  int get_autotune_offset() override;
+  void set_autotune_offset(int offset) override;
 
   boost::property_tree::ptree get_stats() override;
   boost::property_tree::ptree get_stats_current(float timeDiff) override;
@@ -249,9 +315,13 @@ public:
   unsigned long get_multiSiteSystemNumber() override;
   void set_multiSiteSystemNumber(unsigned long multiSiteSystemNumber) override;
 
+  std::string get_filename_format() override;
+  void set_filename_format(std::string format) override;
+
 private:
   TalkgroupDisplayFormat talkgroup_display_format;
   bool d_hideEncrypted;
+  bool d_monitorEncrypted;
   bool d_hideUnknown;
   bool d_multiSite;
   std::string d_multiSiteSystemName;

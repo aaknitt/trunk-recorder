@@ -26,6 +26,7 @@ void dmr_recorder_impl::initialize(Source *src) {
   chan_freq = source->get_center();
   center_freq = source->get_center();
   config = source->get_config();
+  d_soft_vocoder = config->soft_vocoder;
   input_rate = source->get_rate();
   silence_frames = source->get_silence_frames();
   squelch_db = 0;
@@ -98,7 +99,8 @@ void dmr_recorder_impl::initialize(Source *src) {
   rx_queue = gr::msg_queue::make(100);
   int verbosity = 0; // 10 = lots of debug messages
 
-  framer = gr::op25_repeater::frame_assembler::make("file:///tmp/out1.raw", verbosity, 1, rx_queue);
+  framer = gr::op25_repeater::frame_assembler::make("file:///tmp/out1.raw", verbosity, 1, rx_queue, d_soft_vocoder);
+  framer->set_voice_codec_callback(voice_codec_cb_handler, this);
   levels = gr::blocks::multiply_const_ff::make(1);
   plugin_sink_slot0 = gr::blocks::plugin_wrapper_impl::make(std::bind(&dmr_recorder_impl::plugin_callback_handler, this, std::placeholders::_1, std::placeholders::_2));
   plugin_sink_slot1 = gr::blocks::plugin_wrapper_impl::make(std::bind(&dmr_recorder_impl::plugin_callback_handler, this, std::placeholders::_1, std::placeholders::_2));
@@ -122,6 +124,13 @@ void dmr_recorder_impl::initialize(Source *src) {
 
 void dmr_recorder_impl::plugin_callback_handler(int16_t *samples, int sampleCount) {
   plugman_audio_callback(call, this, samples, sampleCount);
+}
+
+void dmr_recorder_impl::voice_codec_cb_handler(int codec_type, long tgid, uint32_t src_id, const uint32_t *params, int param_count, int errs, void *user_data) {
+  dmr_recorder_impl *self = static_cast<dmr_recorder_impl *>(user_data);
+  if (self->call) {
+    plugman_voice_codec_data(self->call, codec_type, tgid, src_id, params, param_count, errs);
+  }
 }
 
 void dmr_recorder_impl::switch_tdma(bool phase2) {
@@ -227,6 +236,17 @@ std::vector<Transmission> dmr_recorder_impl::get_transmission_list() {
   BOOST_LOG_TRIVIAL(info) << "Combined: " << return_list.size();
   sort(return_list.begin(), return_list.end(), compareTransmissions);
   BOOST_LOG_TRIVIAL(info) << "Sorted: " << return_list.size();
+  return return_list;
+}
+
+std::vector<Transmission> dmr_recorder_impl::get_transmission_list(int slot) {
+  std::vector<Transmission> return_list;
+  if (slot == 0) {
+    return_list = wav_sink_slot0->get_transmission_list();
+  } else {
+    return_list = wav_sink_slot1->get_transmission_list();
+  }
+  BOOST_LOG_TRIVIAL(info) << "Slot " << slot << ": " << return_list.size();
   return return_list;
 }
 

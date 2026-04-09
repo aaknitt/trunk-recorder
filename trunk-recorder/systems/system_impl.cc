@@ -53,6 +53,102 @@ void System_impl::set_compress_wav(bool compress) {
   this->compress_wav = compress;
 }
 
+std::string System_impl::get_audio_bitrate() {
+  return this->audio_bitrate;
+}
+
+void System_impl::set_audio_bitrate(std::string bitrate) {
+  this->audio_bitrate = bitrate;
+}
+
+bool System_impl::get_audio_postprocess_enabled() {
+  return this->audio_postprocess_enabled;
+}
+
+void System_impl::set_audio_postprocess_enabled(bool enabled) {
+  this->audio_postprocess_enabled = enabled;
+}
+
+int System_impl::get_audio_highpass_hz() {
+  return this->audio_highpass_hz;
+}
+
+void System_impl::set_audio_highpass_hz(int hz) {
+  this->audio_highpass_hz = hz;
+}
+
+int System_impl::get_audio_lowpass_hz() {
+  return this->audio_lowpass_hz;
+}
+
+void System_impl::set_audio_lowpass_hz(int hz) {
+  this->audio_lowpass_hz = hz;
+}
+
+int System_impl::get_audio_bandreject_hz() {
+  return this->audio_bandreject_hz;
+}
+
+void System_impl::set_audio_bandreject_hz(int hz) {
+  this->audio_bandreject_hz = hz;
+}
+
+int System_impl::get_audio_bandreject_width_hz() {
+  return this->audio_bandreject_width_hz;
+}
+
+void System_impl::set_audio_bandreject_width_hz(int hz) {
+  this->audio_bandreject_width_hz = hz;
+}
+
+bool System_impl::get_audio_loudnorm() {
+  return this->audio_loudnorm;
+}
+
+void System_impl::set_audio_loudnorm(bool enabled) {
+  this->audio_loudnorm = enabled;
+}
+
+bool System_impl::get_audio_loudnorm_two_pass() {
+  return this->audio_loudnorm_two_pass;
+}
+
+void System_impl::set_audio_loudnorm_two_pass(bool enabled) {
+  this->audio_loudnorm_two_pass = enabled;
+}
+
+double System_impl::get_audio_loudnorm_i() {
+  return this->audio_loudnorm_i;
+}
+
+void System_impl::set_audio_loudnorm_i(double value) {
+  this->audio_loudnorm_i = value;
+}
+
+double System_impl::get_audio_loudnorm_tp() {
+  return this->audio_loudnorm_tp;
+}
+
+void System_impl::set_audio_loudnorm_tp(double value) {
+  this->audio_loudnorm_tp = value;
+}
+
+double System_impl::get_audio_loudnorm_lra() {
+  return this->audio_loudnorm_lra;
+}
+
+void System_impl::set_audio_loudnorm_lra(double value) {
+  this->audio_loudnorm_lra = value;
+}
+
+std::string System_impl::get_audio_ffmpeg_filter() {
+  return this->audio_ffmpeg_filter;
+}
+
+void System_impl::set_audio_ffmpeg_filter(std::string filter) {
+  this->audio_ffmpeg_filter = filter;
+}
+
 double System_impl::get_min_duration() {
   return this->min_call_duration;
 }
@@ -93,6 +189,7 @@ System_impl::System_impl(int sys_num) {
   unit_tags = new UnitTags();
   talkgroup_patches = {};
   d_hideEncrypted = false;
+  d_monitorEncrypted = false;
   d_hideUnknown = false;
   d_mdc_enabled = false;
   d_fsync_enabled = false;
@@ -102,6 +199,17 @@ System_impl::System_impl(int sys_num) {
   message_count = 0;
   decode_rate = 0;
   msg_queue = gr::msg_queue::make(100);
+  audio_postprocess_enabled = false;
+  audio_highpass_hz = 0;
+  audio_lowpass_hz = 0;
+  audio_bandreject_hz = 0;
+  audio_bandreject_width_hz = 0;
+  audio_loudnorm = false;
+  audio_loudnorm_two_pass = true;
+  audio_loudnorm_i = -16.0;
+  audio_loudnorm_tp = -0.1;
+  audio_loudnorm_lra = 11.0;
+  audio_ffmpeg_filter = "";
 }
 
 void System_impl::set_xor_mask(unsigned long sys_id, unsigned long wacn, unsigned long nac) {
@@ -331,6 +439,32 @@ void System_impl::set_unit_tags_file(std::string unit_tags_file) {
   this->unit_tags->load_unit_tags(unit_tags_file);
 }
 
+void System_impl::set_unit_tags_ota_file(std::string unit_tags_ota_file) {
+  this->unit_tags_ota_file = unit_tags_ota_file;
+  this->unit_tags->load_unit_tags_ota(unit_tags_ota_file);
+}
+
+std::string System_impl::get_unit_tags_ota_file() {
+  return this->unit_tags_ota_file;
+}
+
+void System_impl::set_unit_tags_mode(std::string mode) {
+  this->unit_tags_mode = mode;
+  if (mode == "ota" || mode == "OTA") {
+    this->unit_tags->set_mode(TAG_OTA_FIRST);
+  } else if (mode == "user_only") {
+    this->unit_tags->set_mode(TAG_USER_ONLY);
+  } else if (mode == "none") {
+    this->unit_tags->set_mode(TAG_NONE);
+  } else {
+    this->unit_tags->set_mode(TAG_USER_FIRST);
+  }
+}
+
+std::string System_impl::get_unit_tags_mode() {
+  return this->unit_tags_mode;
+}
+
 void System_impl::set_custom_freq_table_file(std::string custom_freq_table_file) {
   this->custom_freq_table_file = custom_freq_table_file;
 }
@@ -365,6 +499,9 @@ Talkgroup *System_impl::find_talkgroup_by_freq(double freq) {
 std::string System_impl::find_unit_tag(long unitID) {
   return unit_tags->find_unit_tag(unitID);
 }
+std::string System_impl::find_unit_tag_ota(long unitID) {
+  return unit_tags->find_unit_tag_ota(unitID);
+}
 
 std::vector<double> System_impl::get_channels() {
   return channels;
@@ -373,6 +510,21 @@ std::vector<double> System_impl::get_channels() {
 std::vector<Talkgroup *> System_impl::get_talkgroups() {
   return talkgroups->get_talkgroups();
 }
+
+std::vector<UnitTag *> System_impl::get_unit_tags() {
+  if (unit_tags) {
+    return unit_tags->get_unit_tags();
+  }
+  return std::vector<UnitTag *>();
+}
+
+std::vector<UnitTagOTA *> System_impl::get_unit_tags_ota() {
+  if (unit_tags) {
+    return unit_tags->get_unit_tags_ota();
+  }
+  return std::vector<UnitTagOTA *>();
+}
+
 int System_impl::channel_count() {
   return channels.size();
 }
@@ -534,6 +686,12 @@ bool System_impl::get_hideEncrypted() {
 void System_impl::set_hideEncrypted(bool hideEncrypted) {
   d_hideEncrypted = hideEncrypted;
 }
+bool System_impl::get_monitorEncrypted() {
+  return d_monitorEncrypted;
+}
+void System_impl::set_monitorEncrypted(bool monitorEncrypted) {
+  d_monitorEncrypted = monitorEncrypted;
+}
 
 bool System_impl::get_hideUnknown() {
   return d_hideUnknown;
@@ -541,6 +699,40 @@ bool System_impl::get_hideUnknown() {
 
 void System_impl::set_hideUnknown(bool hideUnknown) {
   d_hideUnknown = hideUnknown;
+}
+
+int System_impl::get_freq_error() {
+  if (p25_trunking) {
+    return p25_trunking->get_freq_error();
+  } else if (smartnet_trunking) {
+    // return smartnet_trunking->get_freq_error();
+  }
+  return 0;
+}
+
+void System_impl::finetune_control_freq(double f) {
+  if (p25_trunking) {
+    p25_trunking->finetune_control_freq(f);
+  } else if (smartnet_trunking) {
+    // smartnet_trunking->finetune_control_freq(f);
+  }
+}
+
+int System_impl::get_autotune_offset() {
+  if (p25_trunking) {
+    return p25_trunking->autotune_offset;
+  } else if (smartnet_trunking) {
+    // return smartnet_trunking->autotune_offset;
+  }
+  return 0;
+}
+
+void System_impl::set_autotune_offset(int offset) {
+  if (p25_trunking) {
+    p25_trunking->autotune_offset = offset;
+  } else if (smartnet_trunking) {
+    // smartnet_trunking->autotune_offset = offset;
+  }
 }
 
 boost::property_tree::ptree System_impl::get_stats() {
@@ -700,4 +892,12 @@ unsigned long System_impl::get_multiSiteSystemNumber() {
 
 void System_impl::set_multiSiteSystemNumber(unsigned long multiSiteSystemNumber) {
   d_multiSiteSystemNumber = multiSiteSystemNumber;
+}
+
+std::string System_impl::get_filename_format() {
+  return this->filename_format;
+}
+
+void System_impl::set_filename_format(std::string format) {
+  this->filename_format = format;
 }

@@ -65,6 +65,8 @@ Source::Source(double c, double r, double e, std::string drv, std::string dev, C
   attached_detector = false;
   attached_selector = false;
   next_selector_port = 0;
+  autotune_source = false;
+  autotune_manager = new AutotuneManager(this);
 
   recorder_selector = gr::blocks::selector::make(sizeof(gr_complex), 0, 0);
 
@@ -169,6 +171,8 @@ void Source::set_iq_source(std::string iq_file, bool repeat, double center, doub
   attached_detector = false;
   attached_selector = false;
   next_selector_port = 0;
+  autotune_source = false;
+  autotune_manager = new AutotuneManager(this);
 
   iq_file_source::sptr iq_file_src;
   iq_file_src = iq_file_source::make(iq_file, this->rate, repeat);
@@ -310,11 +314,15 @@ double Source::get_error() {
 
 /* -- Gain -- */
 
-void Source::set_gain(int r) {
+void Source::set_gain(double r) {
   if (driver == "osmosdr") {
     gain = r;
     cast_to_osmo_sptr(source_block)->set_gain(gain);
-    BOOST_LOG_TRIVIAL(info) << "Gain set to: " << cast_to_osmo_sptr(source_block)->get_gain();
+    double current_gain = cast_to_osmo_sptr(source_block)->get_gain();
+    if (current_gain != gain) {
+      BOOST_LOG_TRIVIAL(error) << "Requested Gain of " << gain << " not supported, driver using: " << current_gain;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Gain set to: " << current_gain;
   }
 
   if (driver == "usrp") {
@@ -323,7 +331,7 @@ void Source::set_gain(int r) {
   }
 }
 
-void Source::add_gain_stage(std::string stage_name, int value) {
+void Source::add_gain_stage(std::string stage_name, double value) {
   Gain_Stage_t stage = {stage_name, value};
   gain_stages.push_back(stage);
 }
@@ -332,13 +340,17 @@ std::vector<Gain_Stage_t> Source::get_gain_stages() {
   return gain_stages;
 }
 
-void Source::set_gain_by_name(std::string name, int new_gain) {
+void Source::set_gain_by_name(std::string name, double new_gain) {
   if (driver == "osmosdr") {
     cast_to_osmo_sptr(source_block)->set_gain(new_gain, name);
-    BOOST_LOG_TRIVIAL(info) << name << " Gain set to: " << cast_to_osmo_sptr(source_block)->get_gain(name);
+    double current_gain = cast_to_osmo_sptr(source_block)->get_gain(name);
+    if (current_gain != new_gain) {
+      BOOST_LOG_TRIVIAL(error) << "Requested " << name << " Gain of " << new_gain << " not supported, driver using: " << current_gain;
+    }
+    BOOST_LOG_TRIVIAL(info) << name << " Gain set to: " << current_gain;
     add_gain_stage(name, new_gain);
   } else {
-    BOOST_LOG_TRIVIAL(error) << "Unable to set Gain by Name for SDR drive: " << driver;
+    BOOST_LOG_TRIVIAL(error) << "Unable to set Gain by Name for SDR driver: " << driver;
   }
 }
 
@@ -355,7 +367,7 @@ int Source::get_gain_by_name(std::string name) {
   return -1;
 }
 
-int Source::get_gain() {
+double Source::get_gain() {
   return gain;
 }
 
@@ -371,8 +383,52 @@ void Source::set_gain_mode(bool m) {
   }
 }
 
-int Source::get_if_gain() {
+double Source::get_if_gain() {
   return if_gain;
+}
+
+double Source::get_bb_gain() {
+  return bb_gain;
+}
+
+double Source::get_mix_gain() {
+  return mix_gain;
+}
+
+double Source::get_lna_gain() {
+  return lna_gain;
+}
+
+double Source::get_tia_gain() {
+  return tia_gain;
+}
+
+double Source::get_pga_gain() {
+  return pga_gain;
+}
+
+double Source::get_vga1_gain() {
+  return vga1_gain;
+}
+
+double Source::get_vga2_gain() {
+  return vga2_gain;
+}
+
+void Source::add_autotune_error_measurement(int error, int offset){
+  autotune_manager->add_error_measurement(error, offset);
+}
+
+int Source::get_source_error(){
+  return autotune_manager->get_average_error();
+}
+
+void Source::set_autotune_source(bool m){
+  autotune_source = m;
+}
+
+bool Source::get_autotune_source() {
+  return autotune_source;
 }
 
 /* -- Recorders -- */
@@ -480,6 +536,7 @@ void Source::create_sigmf_recorders(gr::top_block_sptr tb, int r) {
     sigmf_recorders.push_back(log);
     log->set_selector_port(next_selector_port);
     tb->connect(recorder_selector, next_selector_port, log, 0);
+    next_selector_port++;
   }
 }
 
@@ -565,7 +622,7 @@ Recorder *Source::get_analog_recorder(Talkgroup *talkgroup, int priority, Call *
   if (talkgroup && (priority == -1)) {
     call->set_state(MONITORING);
     call->set_monitoring_state(IGNORED_TG);
-    BOOST_LOG_TRIVIAL(info) << loghdr << "Not recording talkgroup. Priority is -1.";
+    BOOST_LOG_TRIVIAL(info) << loghdr << "Not recording talkgroup - Priority is -1 (Disabled).";
     return NULL;
   }
 
@@ -602,7 +659,7 @@ Recorder *Source::get_digital_recorder(Talkgroup *talkgroup, int priority, Call 
   if (talkgroup && (priority == -1)) {
     call->set_state(MONITORING);
     call->set_monitoring_state(IGNORED_TG);
-    BOOST_LOG_TRIVIAL(info) << loghdr << "Not recording talkgroup. Priority is -1.";
+    BOOST_LOG_TRIVIAL(info) << loghdr << "Not recording talkgroup - Priority is -1 (Disabled).";
     return NULL;
   }
 
@@ -671,41 +728,47 @@ Recorder *Source::get_sigmf_recorder() {
 }
 
 void Source::print_recorders() {
-  BOOST_LOG_TRIVIAL(info) << "[ Source " << src_num << ": " << format_freq(center) << " ] " << device;
+  // If autotune is enabled, show the average correction being applied for this source
+  std::string autotune_status;
+  if (autotune_source) {
+    autotune_status = autotune_manager->get_status_string();
+  }
+
+  BOOST_LOG_TRIVIAL(info) << "[ Source " << src_num << ": " << format_freq(center) << " ] " << device << autotune_status;
 
   for (std::vector<p25_recorder_sptr>::iterator it = digital_recorders.begin();
        it != digital_recorders.end(); it++) {
     p25_recorder_sptr rx = *it;
 
-    BOOST_LOG_TRIVIAL(info) << "\t[ " << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
+    BOOST_LOG_TRIVIAL(info) << "\t[ " << std::setw(2) << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
   }
 
   for (std::vector<p25_recorder_sptr>::iterator it = digital_conv_recorders.begin();
        it != digital_conv_recorders.end(); it++) {
     p25_recorder_sptr rx = *it;
 
-    BOOST_LOG_TRIVIAL(info) << "\t[ " << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
+    BOOST_LOG_TRIVIAL(info) << "\t[ " << std::setw(2) << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
   }
 
   for (std::vector<dmr_recorder_sptr>::iterator it = dmr_conv_recorders.begin();
        it != dmr_conv_recorders.end(); it++) {
     dmr_recorder_sptr rx = *it;
 
-    BOOST_LOG_TRIVIAL(info) << "\t[ " << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
+    BOOST_LOG_TRIVIAL(info) << "\t[ " << std::setw(2) << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
   }
 
   for (std::vector<analog_recorder_sptr>::iterator it = analog_recorders.begin();
        it != analog_recorders.end(); it++) {
     analog_recorder_sptr rx = *it;
 
-    BOOST_LOG_TRIVIAL(info) << "\t[ " << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
+    BOOST_LOG_TRIVIAL(info) << "\t[ " << std::setw(2) << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
   }
 
   for (std::vector<analog_recorder_sptr>::iterator it = analog_conv_recorders.begin();
        it != analog_conv_recorders.end(); it++) {
     analog_recorder_sptr rx = *it;
 
-    BOOST_LOG_TRIVIAL(info) << "\t[ " << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
+    BOOST_LOG_TRIVIAL(info) << "\t[ " << std::setw(2) << rx->get_num() << " ] " << rx->get_type_string() << "\tState: " << format_state(rx->get_state());
   }
 }
 

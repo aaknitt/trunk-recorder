@@ -1,11 +1,24 @@
 #include "monitor_systems.h"
+#include "recorders/p25_recorder.h"
+#include <chrono>
+#include <boost/log/sinks/text_file_backend.hpp>
+#include <boost/log/core.hpp>
+
 using namespace std;
 
+// External reference to global log sink for SIGHUP rotation
+extern boost::shared_ptr<boost::log::sinks::synchronous_sink<boost::log::sinks::text_file_backend>> global_log_sink;
+
 volatile sig_atomic_t exit_flag = 0;
+volatile sig_atomic_t rotate_log_flag = 0;
 int exit_code = EXIT_SUCCESS;
 
 void exit_interupt(int sig) { // can be called asynchronously
   exit_flag = 1;              // set flag
+}
+
+void rotate_log_signal(int sig) { // can be called asynchronously
+  rotate_log_flag = 1;          // set flag
 }
 
 uint64_t time_since_epoch_millisec() {
@@ -51,18 +64,24 @@ bool start_recorder(Call *call, TrunkMessage message, Config &config, System *sy
   }
 
   if (call->get_encrypted() == true || (talkgroup && (talkgroup->mode.compare("E") == 0 || talkgroup->mode.compare("TE") == 0 || talkgroup->mode.compare("DE") == 0))) {
-    call->set_state(MONITORING);
-    call->set_monitoring_state(ENCRYPTED);
-    if (sys->get_hideEncrypted() == false) {
-      long unit_id = call->get_current_source_id();
-      std::string tag = sys->find_unit_tag(unit_id);
-      if (tag != "") {
-        tag = " (\033[0;34m" + tag + "\033[0m)";
-      }
-      std::string loghdr = log_header( sys->get_short_name(), call->get_call_num(), call->get_talkgroup_display(), call->get_freq());
-      BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[31mNot Recording: ENCRYPTED\u001b[0m - src: " << unit_id << tag;
+    if (talkgroup && (talkgroup->mode.compare("E") == 0 || talkgroup->mode.compare("TE") == 0 || talkgroup->mode.compare("DE") == 0)) {
+      call->set_encrypted(true);
     }
-    return false;
+    
+    if (!sys->get_monitorEncrypted()) {
+      call->set_state(MONITORING);
+      call->set_monitoring_state(ENCRYPTED);
+      if (sys->get_hideEncrypted() == false) {
+        long unit_id = call->get_current_source_id();
+        std::string tag = sys->find_unit_tag(unit_id);
+        if (tag != "") {
+          tag = " (\033[0;34m" + tag + "\033[0m)";
+        }
+        std::string loghdr = log_header( sys->get_short_name(), call->get_call_num(), call->get_talkgroup_display(), call->get_freq());
+        BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[31mNot Recording: ENCRYPTED\u001b[0m - src: " << unit_id << tag;
+      }
+      return false;
+    }
   }
 
   for (vector<Source *>::iterator it = sources.begin(); it != sources.end(); it++) {
@@ -185,7 +204,7 @@ void print_status(std::vector<Source *> &sources, std::vector<System *> &systems
     }
 
     if (recorder) {
-        BOOST_LOG_TRIVIAL(info) << "\t[ " << recorder->get_num() << " ] State: " << format_state(recorder->get_state());
+        BOOST_LOG_TRIVIAL(info) << "\t[ " << std::setw(2) << recorder->get_num() << " ] State: " << format_state(recorder->get_state());
     }
   }
 
@@ -202,6 +221,11 @@ void print_status(std::vector<Source *> &sources, std::vector<System *> &systems
 
     if ((sys->get_system_type() != "conventional") && (sys->get_system_type() != "conventionalP25") && (sys->get_system_type() != "conventionalDMR") && (sys->get_system_type() != "conventionalSIGMF")) {
       BOOST_LOG_TRIVIAL(info) << "[" << sys->get_short_name() << "]\t" << format_freq(sys->get_current_control_channel()) << "\t" << sys->get_decode_rate() << " msg/sec";
+      
+      if ((sys->get_source()->get_autotune_source()) && (sys->get_system_type() == "p25")) {
+        // If control channel source has autotune enabled, perform autotune adjustments and log to console
+        autotune_control_channel(sys);
+      }
     }
   }
 
@@ -361,6 +385,9 @@ void unit_location(System *sys, long source_id, long talkgroup_num) {
   plugman_unit_location(sys, source_id, talkgroup_num);
 }
 
+
+
+
 void handle_call_grant(TrunkMessage message, System *sys, bool grant_message, Config &config, std::vector<Source *> &sources, std::vector<Call *> &calls) {
   bool call_found = false;
   bool duplicate_grant = false;
@@ -495,9 +522,9 @@ void handle_call_grant(TrunkMessage message, System *sys, bool grant_message, Co
         grant_call_data = boost::format("\u001b[34m%sC\u001b[0m %s/%s ") % call->get_call_num() % sys->get_multiSiteSystemName() % sys->get_multiSiteSystemNumber();
       }
     }
-    std::string loghdr = log_header( call->get_short_name(), call->get_call_num(), call->get_talkgroup_display(), call->get_freq());
     if (superseding_grant) {
-      
+      std::string loghdr = log_header( call->get_short_name(), call->get_call_num(), call->get_talkgroup_display(), call->get_freq());
+
       BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[36mSuperseding Grant\u001b[0m - Stopping original call: " << original_call_data << "- Superseding call: " << grant_call_data;
       // Attempt to start a new call on the preferred NAC.
       recording_started = start_recorder(call, message, config, sys, sources);
@@ -508,16 +535,18 @@ void handle_call_grant(TrunkMessage message, System *sys, bool grant_message, Co
         original_call->set_monitoring_state(SUPERSEDED);
         original_call->conclude_call();
       } else {
-        
+
         BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[36mCould not start Superseding recorder.\u001b[0m Continuing original call: " << original_call->get_call_num() << "C";
       }
     } else if (duplicate_grant) {
+      std::string loghdr = log_header( call->get_short_name(), call->get_call_num(), call->get_talkgroup_display(), call->get_freq());
       call->set_state(MONITORING);
       call->set_monitoring_state(DUPLICATE);
       BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[36mDuplicate Grant\u001b[0m - Not recording: " << grant_call_data << "- Original call: " << original_call_data;
     } else {
       recording_started = start_recorder(call, message, config, sys, sources);
       if (recording_started && !grant_message) {
+        std::string loghdr = log_header( call->get_short_name(), call->get_call_num(), call->get_talkgroup_display(), call->get_freq());
         BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[36mThis was an UPDATE\u001b[0m";
       }
     }
@@ -544,6 +573,15 @@ void handle_call_update(TrunkMessage message, System *sys, std::vector<Call *> &
     // BOOST_LOG_TRIVIAL(info) << "TG: " << call->get_talkgroup() << " | " << message.talkgroup << " sys num: " << call->get_sys_num() << " | " << message.sys_num << " freq: " << call->get_freq() << " | " << message.freq << " TDMA Slot" << call->get_tdma_slot() << " | " << message.tdma_slot << " TDMA: " << call->get_phase2_tdma() << " | " << message.phase2_tdma;
     if ((call->get_talkgroup() == message.talkgroup) && (call->get_sys_num() == message.sys_num) && (call->get_freq() == message.freq) && (call->get_tdma_slot() == message.tdma_slot) && (call->get_phase2_tdma() == message.phase2_tdma)) {
       call_found = true;
+
+      if (message.encrypted) {
+        call->set_encrypted(true);
+      } else {
+        Talkgroup *talkgroup = sys->find_talkgroup(message.talkgroup);
+        if (talkgroup && (talkgroup->mode.compare("E") == 0 || talkgroup->mode.compare("TE") == 0 || talkgroup->mode.compare("DE") == 0)) {
+          call->set_encrypted(true);
+        }
+      }
 
       bool source_updated = call->update(message);
       if (source_updated) {
@@ -672,7 +710,7 @@ void retune_system(System *sys, gr::top_block_sptr &tb, std::vector<Source *> &s
     // For Loop
     if (system->get_system_type() == "smartnet") {
       system->smartnet_trunking->tune_freq(control_channel_freq);
-      system->smartnet_trunking->reset();
+      //system->smartnet_trunking->reset();
     } else if (system->get_system_type() == "p25") {
       system->p25_trunking->tune_freq(control_channel_freq);
     } else {
@@ -692,18 +730,21 @@ void retune_system(System *sys, gr::top_block_sptr &tb, std::vector<Source *> &s
           // We must lock the flow graph in order to disconnect and reconnect blocks
           tb->lock();
           tb->disconnect(current_source->get_src_block(), 0, system->smartnet_trunking, 0);
-          system->smartnet_trunking = make_smartnet_trunking(control_channel_freq, source->get_center(), source->get_rate(), system->get_msg_queue(), system->get_sys_num());
+          system->smartnet_trunking = smartnet_impl::make(control_channel_freq, source->get_center(), source->get_rate(), system->get_msg_queue(), system->get_sys_num());
           tb->connect(source->get_src_block(), 0, system->smartnet_trunking, 0);
           tb->unlock();
-          system->smartnet_trunking->reset();
+          //system->smartnet_trunking->reset();
         } else if (system->get_system_type() == "p25") {
           system->set_source(source);
           // We must lock the flow graph in order to disconnect and reconnect blocks
-          tb->stop();
+          // ( We have gone back and forth on whether this should be lock/unlock or stop/wait/start.
+          //   If there are unexplained issues around control channel tuning, we should look at alternet
+          //   approaches. See PR #1090 )
+          tb->lock();
           tb->disconnect(current_source->get_src_block(), 0, system->p25_trunking, 0);
           system->p25_trunking = make_p25_trunking(control_channel_freq, source->get_center(), source->get_rate(), system->get_msg_queue(), system->get_qpsk_mod(), system->get_sys_num());
           tb->connect(source->get_src_block(), 0, system->p25_trunking, 0);
-          tb->start();
+          tb->unlock();
         } else {
           BOOST_LOG_TRIVIAL(error) << "\t - Unkown system type for Retune";
         }
@@ -715,6 +756,12 @@ void retune_system(System *sys, gr::top_block_sptr &tb, std::vector<Source *> &s
   }
   if (!source_found) {
     BOOST_LOG_TRIVIAL(error) << "\t - Unable to retune System control channel, freq not covered by any source.";
+  } else {
+    if ((system->get_source()->get_autotune_source()) && (system->get_system_type() == "p25")) {
+      // If control channel source has autotune enabled, perform adjustments after retune completes
+      // Don't store measurements since the control channel recorder just started
+      autotune_control_channel(system, false);
+    }
   }
 }
 
@@ -782,6 +829,23 @@ void process_message_queues(std::vector<System *> &systems) {
   }
 }
 
+// Process message queues for recorders associated with Calls
+void process_recorder_message_queues(std::vector<Call *> &calls) {
+  for (vector<Call *>::iterator it = calls.begin(); it != calls.end(); ++it) {
+    Call *call = *it;
+    if (call->get_state() == RECORDING) {
+      Recorder *recorder = call->get_recorder();
+      if (recorder && (recorder->get_type() == P25 || recorder->get_type() == P25C)) {
+        p25_recorder *p25_rec = dynamic_cast<p25_recorder *>(recorder);
+        // Verify recorder status as conventionals calls may be in a RECORDING:IDLE state
+        if (p25_rec && (p25_rec->is_active())) {
+          p25_rec->process_message_queues();
+        }
+      }
+    }
+  }
+}
+
 int monitor_messages(Config &config, gr::top_block_sptr &tb, std::vector<Source *> &sources, std::vector<System *> &systems, std::vector<Call *> &calls) {
   gr::message::sptr msg;
 
@@ -796,8 +860,9 @@ int monitor_messages(Config &config, gr::top_block_sptr &tb, std::vector<Source 
   P25Parser *p25_parser;
 
   signal(SIGINT, exit_interupt);
+  signal(SIGHUP, rotate_log_signal);
 
-  smartnet_parser = new SmartnetParser(); // this has to eventually be generic;
+  smartnet_parser = new SmartnetParser(systems.front()); // this has to eventually be generic;
   p25_parser = new P25Parser();
 
   while (1) {
@@ -807,22 +872,32 @@ int monitor_messages(Config &config, gr::top_block_sptr &tb, std::vector<Source 
       for (vector<Call *>::iterator it = calls.begin(); it != calls.end();) {
         Call *call = *it;
 
-        if (call->get_state() != MONITORING) {
-          call->conclude_call();
-        }
+        call->conclude_call();
 
         it = calls.erase(it);
         delete call;
       }
 
       BOOST_LOG_TRIVIAL(info) << "Cleaning up & Exiting...";
-
-      // Sleep for 5 seconds to allow for all of the Call Concluder threads to finish.
-      boost::this_thread::sleep(boost::posix_time::milliseconds(5000));
+      Call_Concluder::shutdown_call_data_workers(std::chrono::seconds(10));
       return exit_code;
     }
 
+    if (rotate_log_flag) { // SIGHUP received for log rotation
+      rotate_log_flag = 0;  // reset flag
+      if (global_log_sink) {
+        BOOST_LOG_TRIVIAL(info) << "Received SIGHUP signal - rotating log file...";
+        // Flush the sink
+        global_log_sink->flush();
+        // Rotate the log file by removing and re-adding the backend
+        boost::log::core::get()->remove_sink(global_log_sink);
+        boost::log::core::get()->add_sink(global_log_sink);
+        BOOST_LOG_TRIVIAL(info) << "Log file rotation complete";
+      }
+    }
+
     process_message_queues(systems);
+    process_recorder_message_queues(calls);
 
     plugman_poll_one();
 
@@ -836,7 +911,7 @@ int monitor_messages(Config &config, gr::top_block_sptr &tb, std::vector<Source 
           system->set_message_count(system->get_message_count() + 1);
 
           if (system->get_system_type() == "smartnet") {
-            trunk_messages = smartnet_parser->parse_message(msg->to_string(), system);
+            trunk_messages = smartnet_parser->parse_message(msg, system);
             handle_message(trunk_messages, system, config, sources, calls, tb);
             plugman_trunk_message(trunk_messages, system);
           }
@@ -858,7 +933,7 @@ int monitor_messages(Config &config, gr::top_block_sptr &tb, std::vector<Source 
     }
     current_time = time(NULL);
     current_time_ms = time_since_epoch_millisec();
-    if ((current_time_ms - last_conventional_channel_detection_check) >= 0.1) {
+    if ((current_time_ms - last_conventional_channel_detection_check) >= 100) {
       check_conventional_channel_detection(sources);
       last_conventional_channel_detection_check = current_time_ms;
     }
@@ -879,7 +954,9 @@ int monitor_messages(Config &config, gr::top_block_sptr &tb, std::vector<Source 
         Source *source = *src_it;
         if (!source->got_samples()) {
           BOOST_LOG_TRIVIAL(error) << "Source " << source->get_num() << " has stopped receiving samples - Terminating trunk recorder";
-          exit(1);
+          exit_code = EXIT_FAILURE;
+          exit_flag = 1;
+          break;
         }
       }
       last_decode_rate_check = current_time;

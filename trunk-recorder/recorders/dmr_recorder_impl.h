@@ -108,12 +108,14 @@ public:
   bool is_squelched();
   double get_pwr();
   std::vector<Transmission> get_transmission_list();
+  std::vector<Transmission> get_transmission_list(int slot);
   State get_state();
   int lastupdate();
   long elapsed();
   Source *get_source();
 
   void plugin_callback_handler(int16_t *samples, int sampleCount);
+  static void voice_codec_cb_handler(int codec_type, long tgid, uint32_t src_id, const uint32_t *params, int param_count, int errs, void *user_data);
 
 protected:
   State state;
@@ -138,6 +140,7 @@ private:
   int silence_frames;
   int tdma_slot;
   bool d_phase2_tdma;
+  bool d_soft_vocoder;
   long input_rate;
   const int phase1_samples_per_symbol = 5;
   const double phase1_symbol_rate = 4800;

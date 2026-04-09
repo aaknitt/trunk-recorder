@@ -8,6 +8,7 @@
 #include <boost/algorithm/string.hpp>
 #include <signal.h>
 #include <stdio.h>
+#include <chrono>
 
 std::string Call_impl::get_capture_dir() {
   return this->config.capture_dir;
@@ -41,6 +42,11 @@ Call_impl::Call_impl(long t, double f, System *s, Config c) {
   sys = s;
   start_time = time(NULL);
   stop_time = time(NULL);
+  start_time_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+  stop_time_ms = 0;
   last_update = time(NULL);
   state = MONITORING;
   monitoringState = UNSPECIFIED;
@@ -74,6 +80,11 @@ Call_impl::Call_impl(TrunkMessage message, System *s, Config c) {
   sys = s;
   start_time = time(NULL);
   stop_time = time(NULL);
+  start_time_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
+  stop_time_ms = 0;
   last_update = time(NULL);
   state = MONITORING;
   monitoringState = UNSPECIFIED;
@@ -123,6 +134,10 @@ void Call_impl::conclude_call() {
 
   // BOOST_LOG_TRIVIAL(info) << "conclude_call()";
   stop_time = time(NULL);
+  stop_time_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()
+        ).count();
 
   if (state == RECORDING || (state == MONITORING && monitoringState == SUPERSEDED)) {
     if (!recorder) {
@@ -153,7 +168,7 @@ void Call_impl::conclude_call() {
     }
     freq_error = this->get_recorder()->get_freq_error();
     this->get_recorder()->stop();
-    transmission_list = this->get_recorder()->get_transmission_list();
+
     if (this->get_sigmf_recording() == true) {
       this->get_sigmf_recorder()->stop();
     }
@@ -162,10 +177,23 @@ void Call_impl::conclude_call() {
       this->get_debug_recorder()->stop();
     }
 
-    Call_Concluder::conclude_call(this, sys, config);
+    if (this->sys->get_system_type() == "conventionalDMR") {
+      dmr_recorder *recorder = dynamic_cast<dmr_recorder *>(this->get_recorder());
+      // Conventional DMR is recorded on two slots, so we need to conclude the call for each slot
+      transmission_list = recorder->get_transmission_list(0);
+      tdma_slot = 0;
+      Call_Concluder::conclude_call(this, sys, config);
+      transmission_list = recorder->get_transmission_list(1);
+      tdma_slot = 1;
+      Call_Concluder::conclude_call(this, sys, config);
+    } else {
+      // All other system types do not have multiple recorders
+      transmission_list = this->get_recorder()->get_transmission_list();
+      Call_Concluder::conclude_call(this, sys, config);
+   }
+
   }
 }
-
 void Call_impl::set_sigmf_recorder(Recorder *r) {
   sigmf_recorder = r;
 }
@@ -211,6 +239,21 @@ double Call_impl::get_current_length() {
   } else {
     return 0; // time(NULL) - start_time;
   }
+}
+
+std::int64_t Call_impl::get_start_time_ms() {
+  // Prefer the earliest transmission start (true playable start)
+  if (!transmission_list.empty()) {
+    std::int64_t best = 0;
+    for (const auto& t : transmission_list) {
+      if (t.start_time_ms > 0 && (best == 0 || t.start_time_ms < best)) {
+        best = t.start_time_ms;
+      }
+    }
+    if (best > 0) return best;
+  }
+  // Fallback: call creation time in ms
+  return start_time_ms;
 }
 
 System *Call_impl::get_system() {
@@ -283,7 +326,10 @@ MonitoringState Call_impl::get_monitoring_state() {
 }
 
 void Call_impl::set_encrypted(bool m) {
-  encrypted = m;
+  if (encrypted != m) {
+    encrypted = m;
+    update_talkgroup_display();
+  }
 }
 
 bool Call_impl::get_encrypted() {
@@ -483,12 +529,13 @@ void Call_impl::update_talkgroup_display() {
   }
 
   char formattedTalkgroup[62];
+  int color = encrypted ? 31 : 35; // Red for encrypted, magenta for normal
   if (this->sys->get_talkgroup_display_format() == talkGroupDisplayFormat_id_tag) {
-    snprintf(formattedTalkgroup, 61, "%10ld (%c[%dm%23s%c[0m)", talkgroup, 0x1B, 35, talkgroup_tag.c_str(), 0x1B);
+    snprintf(formattedTalkgroup, 61, "%10ld (%c[%dm%23s%c[0m)", talkgroup, 0x1B, color, talkgroup_tag.c_str(), 0x1B);
   } else if (this->sys->get_talkgroup_display_format() == talkGroupDisplayFormat_tag_id) {
-    snprintf(formattedTalkgroup, 61, "%c[%dm%23s%c[0m (%10ld)", 0x1B, 35, talkgroup_tag.c_str(), 0x1B, talkgroup);
+    snprintf(formattedTalkgroup, 61, "%c[%dm%23s%c[0m (%10ld)", 0x1B, color, talkgroup_tag.c_str(), 0x1B, talkgroup);
   } else {
-    snprintf(formattedTalkgroup, 61, "%c[%dm%10ld%c[0m", 0x1B, 35, talkgroup, 0x1B);
+    snprintf(formattedTalkgroup, 61, "%c[%dm%10ld%c[0m", 0x1B, color, talkgroup, 0x1B);
   }
   talkgroup_display = boost::lexical_cast<std::string>(formattedTalkgroup);
 }
@@ -520,6 +567,8 @@ boost::property_tree::ptree Call_impl::get_stats() {
   call_node.put("duplex", this->get_duplex());
   call_node.put("startTime", this->get_start_time());
   call_node.put("stopTime", this->get_stop_time());
+  call_node.put("startTimeMs", this->get_start_time_ms());
+  call_node.put("stopTimeMs",  this->stop_time_ms);
   call_node.put("srcId", this->get_current_source_id());
 
   Recorder *recorder = this->get_recorder();

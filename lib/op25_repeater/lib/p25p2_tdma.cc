@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <sys/time.h>
 
+#include "imbe_decoder.h"
 #include "op25_msg_types.h"
 #include "p25p2_duid.h"
 #include "p25p2_sync.h"
@@ -36,6 +37,13 @@
 #include "mbelib.h"
 #include "ambe.h"
 #include "crc16.h"
+
+// Helper to get current time in milliseconds since epoch
+static uint64_t get_time_ms() {
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (uint64_t)(tv.tv_sec) * 1000 + (uint64_t)(tv.tv_usec) / 1000;
+}
 
 static const int BURST_SIZE = 180;
 static const int SUPERFRAME_SIZE = (12*BURST_SIZE);
@@ -89,7 +97,7 @@ static const uint8_t mac_msg_len[256] = {
 	28,  0,  0, 14, 17, 14,  0,  0, 16,  8, 11,  0, 13, 19,  0,  0, 
 	 0,  0, 16, 14,  0,  0, 12,  0, 22,  0, 11, 13, 11,  0, 15,  0 };
 
-p25p2_tdma::p25p2_tdma(const op25_audio& udp, log_ts& logger, int slotid, int debug, bool do_msgq, gr::msg_queue::sptr queue, std::deque<int16_t> &qptr, bool do_audio_output, int msgq_id) :	// constructor
+p25p2_tdma::p25p2_tdma(const op25_audio& udp, log_ts& logger, int slotid, int debug, bool do_msgq, gr::msg_queue::sptr queue, std::deque<int16_t> &qptr, bool do_audio_output, bool soft_vocoder, int msgq_id) :	// constructor
 	tdma_xormask(new uint8_t[SUPERFRAME_SIZE]),
 	symbols_received(0),
 	packets(0),
@@ -103,6 +111,7 @@ p25p2_tdma::p25p2_tdma(const op25_audio& udp, log_ts& logger, int slotid, int de
 	d_do_msgq(do_msgq),
 	d_msgq_id(msgq_id),
 	d_do_audio_output(do_audio_output),
+	d_soft_vocoder(soft_vocoder),
 	op25audio(udp),
     logts(logger),
 	d_nac(0),
@@ -116,7 +125,14 @@ p25p2_tdma::p25p2_tdma(const op25_audio& udp, log_ts& logger, int slotid, int de
 	next_keyid(0),
 	next_algid(0x80),
 	p2framer(),
-    crypt_algs(logger, debug, msgq_id)
+    crypt_algs(logger, debug, msgq_id),
+    src_id(-1),
+    grp_id(-1),
+    cached_src_id(-1),
+    cached_grp_id(-1),
+    cached_id_timestamp(0),
+    voice_codec_cb_(NULL),
+    voice_codec_cb_data_(NULL)
 {
 	assert (slotid == 0 || slotid == 1);
 	mbe_initMbeParms (&cur_mp, &prev_mp, &enh_mp);
@@ -142,6 +158,9 @@ void p25p2_tdma::call_end() {
 	reset_vb();
 	d_tdma_slot_first_4v = -1;
 	burst_type = -1;
+	cached_src_id = -1;
+	cached_grp_id = -1;
+	cached_id_timestamp = 0;
 }
 
 void p25p2_tdma::crypt_reset() {
@@ -274,8 +293,21 @@ void p25p2_tdma::handle_mac_ptt(const uint8_t byte_buf[], const unsigned int len
 			crypt_algs.prepare(ess_algid, ess_keyid, PT_P25_PHASE2, ess_mi);
 		}
 
+		// Detect ID change during voice channel continuation
+		// If cached IDs exist and differ from incoming IDs, this is a new unit
+		if (cached_src_id != -1 && (cached_src_id != srcaddr || cached_grp_id != grpaddr))
+		{
+			if (d_debug >= 10)
+			{
+				fprintf(stderr, "%s MAC_PTT: New unit detected (old src=%ld grp=%ld, new src=%u grp=%u)\n",
+						logts.get(d_msgq_id), cached_src_id, cached_grp_id, srcaddr, grpaddr);
+			}
+		}
 		src_id = srcaddr;
 		grp_id = grpaddr;
+		cached_src_id = srcaddr;  // Update persistent cache
+		cached_grp_id = grpaddr;  // Update persistent cache
+		cached_id_timestamp = get_time_ms();  // Record when IDs were cached
 
 		std::string s = "{\"srcaddr\" : " + std::to_string(srcaddr) + ", \"grpaddr\": " + std::to_string(grpaddr) + "}";
         send_msg(s, -3);
@@ -298,14 +330,21 @@ void p25p2_tdma::handle_mac_end_ptt(const uint8_t byte_buf[], const unsigned int
 
 		//src_id = srcaddr; // the decode for Source Address is not correct
 		grp_id = grpaddr;
+		// Reset cached IDs on call end
+		cached_src_id = -1;
+		cached_grp_id = -1;
+		cached_id_timestamp = 0;
 
         if (d_debug >= 10)
                 fprintf(stderr, "%s MAC_END_PTT: colorcd=0x%03x, srcaddr=%u, grpaddr=%u, rs_errs=%d\n", logts.get(d_msgq_id), colorcd, srcaddr, grpaddr, rs_errs);
 
-        op25audio.send_audio_flag(op25_audio::DRAIN);
-		terminate_call = std::pair<bool,long>(true, output_queue_decode.size());
-		// reset crypto parameters
-        reset_ess();
+		// dev/id-fix
+		// **********
+        // op25audio.send_audio_flag(op25_audio::DRAIN);
+		// terminate_call = std::pair<bool,long>(true, output_queue_decode.size());
+		// // reset crypto parameters
+        // reset_ess();
+		// **********
 }
 
 void p25p2_tdma::handle_mac_idle(const uint8_t byte_buf[], const unsigned int len, const int rs_errs) 
@@ -341,6 +380,15 @@ void p25p2_tdma::handle_mac_hangtime(const uint8_t byte_buf[], const unsigned in
 
         if (d_debug >= 10)
                 fprintf(stderr, ", rs_errs=%d\n", rs_errs);
+
+	op25audio.send_audio_flag(op25_audio::DRAIN);
+	terminate_call = std::pair<bool, long>(true, output_queue_decode.size());
+	// reset crypto parameters
+	reset_ess();
+	// Reset cached IDs - forces alias deferral until next MAC_PTT establishes new IDs
+	cached_src_id = -1;
+	cached_grp_id = -1;
+	cached_id_timestamp = 0;
 }
 
 
@@ -348,7 +396,7 @@ void p25p2_tdma::decode_mac_msg(const uint8_t byte_buf[], const unsigned int len
 {
 	std::string s;
 	std::string pdu;
-	uint8_t b1b2, mco, op, mfid, msg_ptr, msg_len, len_remaining;
+	uint8_t b1b2, mco, op, mfid, msg_ptr, msg_len = 0, len_remaining;
     uint16_t colorcd;
 
 	colorcd = nac;
@@ -360,10 +408,39 @@ void p25p2_tdma::decode_mac_msg(const uint8_t byte_buf[], const unsigned int len
         op   = (b1b2 << 6) + mco;
 		mfid = 0;
 
+		// Variables need to be defined outside of the Switch.
+		uint16_t grpaddr;
+		uint32_t srcaddr;
+		uint32_t wacn;
+		uint32_t sysid;
+
 		// Find message length using opcode handlers or lookup table
 		switch (op) {
 			case 0x00: // Null Information
 				msg_len = len_remaining;
+				break;
+			case 0x01: // Group Voice Channel User - Abbreviated
+				if (b1b2 == 0x0)
+				{
+					msg_len = 7;
+
+					grpaddr = (byte_buf[msg_ptr + 2] << 8) + byte_buf[msg_ptr + 3];
+					srcaddr = (byte_buf[msg_ptr + 4] << 16) + (byte_buf[msg_ptr + 5] << 8) + byte_buf[msg_ptr + 6];
+					// Detect ID change during voice channel continuation
+					if (cached_src_id != -1 && (cached_src_id != srcaddr || cached_grp_id != grpaddr))
+					{
+						if (d_debug >= 10)
+						{
+							fprintf(stderr, "%s Group Voice User 0x01: New unit detected (old src=%ld grp=%ld, new src=%u grp=%u)\n",
+									logts.get(d_msgq_id), cached_src_id, cached_grp_id, srcaddr, grpaddr);
+						}
+					}
+					src_id = srcaddr;
+					grp_id = grpaddr;
+					cached_src_id = srcaddr;			 // Update persistent cache
+					cached_grp_id = grpaddr;			 // Update persistent cache
+					cached_id_timestamp = get_time_ms(); // Record when IDs were cached
+				}
 				break;
 			case 0x08: // Null Avoid Zero Bias Message
 				msg_len = byte_buf[msg_ptr+1] & 0x3f;
@@ -373,6 +450,33 @@ void p25p2_tdma::decode_mac_msg(const uint8_t byte_buf[], const unsigned int len
 				break;
 			case 0x12: // Individual Paging with Priority
 				msg_len = (((byte_buf[msg_ptr+1] & 0x3) + 1) * 3) + 2;
+				break;
+			case 0x21: // Group Voice Channel User - Extended
+				if (b1b2 == 0x0)
+				{
+					msg_len = 14;
+
+					grpaddr = (byte_buf[msg_ptr + 2] << 8) + byte_buf[msg_ptr + 3];
+					wacn = ((byte_buf[msg_ptr + 7] << 12) + (byte_buf[msg_ptr + 8] << 4) + (byte_buf[msg_ptr + 9] >> 4)) & 0xFFFFF;
+					sysid = ((byte_buf[msg_ptr + 9] & 0x0F) << 8) + byte_buf[msg_ptr + 10];
+					srcaddr = (byte_buf[msg_ptr + 11] << 16) + (byte_buf[msg_ptr + 12] << 8) + byte_buf[msg_ptr + 13];
+					// Detect ID change during voice channel continuation
+					if (cached_src_id != -1 && (cached_src_id != (long)srcaddr || cached_grp_id != (long)grpaddr))
+					{
+						if (d_debug >= 10)
+						{
+							fprintf(stderr, "%s Group Voice User 0x21: New unit detected (old src=%ld grp=%ld, new src=%u grp=%u)\n",
+									logts.get(d_msgq_id), cached_src_id, cached_grp_id, srcaddr, grpaddr);
+						}
+					}
+					// Need to discuss what to do for fully qualified radio IDs.
+					// Currently this uses only the Radio ID portion from Roaming Units.
+					src_id = srcaddr;
+					grp_id = grpaddr;
+					cached_src_id = srcaddr;			 // Update persistent cache
+					cached_grp_id = grpaddr;			 // Update persistent cache
+					cached_id_timestamp = get_time_ms(); // Record when IDs were cached
+				}
 				break;
 			default:
 				if (b1b2 == 0x2) {				// Manufacturer-specific ops have len field
@@ -385,6 +489,75 @@ void p25p2_tdma::decode_mac_msg(const uint8_t byte_buf[], const unsigned int len
 
 		if (d_debug >= 10) {
 			fprintf(stderr, "mco=%01x/%02x(0x%02x), len=%d", b1b2, mco, op, msg_len);
+		}
+
+		// Check for Motorola Talker Alias messages (Phase 2 TDMA)
+		if (op == 145 && mfid == 0x90) {  // 0x91 = Motorola Talker Alias Header
+			// Extract message count from header byte 5 (full byte, not bits)
+			if (msg_len >= 6) {
+				int messages = byte_buf[msg_ptr + 5];
+				// Initialize alias buffer
+				alias_buffer[0].assign(byte_buf + msg_ptr, byte_buf + msg_ptr + msg_len);
+				for (int i = 1; i <= messages && i < 10; i++) {
+					alias_buffer[i] = std::vector<uint8_t>(17, 0);
+				}
+			}
+		} else if (op == 149 && mfid == 0x90) {  // 0x95 = Motorola Talker Alias Data Block
+			if (msg_len >= 4 && alias_buffer[0].size() >= 9) {
+				int messages = alias_buffer[0][5];
+				int header_sequence = alias_buffer[0][8] >> 4;
+				int block_num = byte_buf[msg_ptr + 3];
+				int msg_sequence = byte_buf[msg_ptr + 4] >> 4;
+
+				if ((block_num > 0 && block_num < 10) && (msg_sequence == header_sequence)) {
+					alias_buffer[block_num].assign(byte_buf + msg_ptr, byte_buf + msg_ptr + msg_len);
+					
+					// When all blocks received, send raw buffer to recorder for decoding
+					if (block_num == messages && messages > 0) {
+						std::string msg = "{\"type\": \"motorola_alias_p2\", \"messages\": " + std::to_string(messages) + ", \"blocks\": {";
+						for (int i = 0; i <= messages && i < 10; i++) {
+							if (!alias_buffer[i].empty()) {
+								if (i > 0) msg += ", ";
+								msg += "\"" + std::to_string(i) + "\": \"" + uint8_vector_to_hex_string(alias_buffer[i]) + "\"";
+							}
+						}
+						msg += "}}";
+						send_msg(msg, M_P25_JSON_DATA);
+					}
+				}
+			}
+		} else if (op == 168 && mfid == 0xA4) {  // 0xA8 = Harris Talker Alias (single variable-length message)
+            if (d_debug >= 10) {
+                fprintf(stderr, "\n*** HARRIS P2 ALIAS MESSAGE RECEIVED ***\n");
+                fprintf(stderr, "    Opcode: 0x%02x (168), MFID: 0x%02x (Harris), Length: %d\n", op, mfid, msg_len);
+                fprintf(stderr, "    Raw message bytes: ");
+                for (int i = 0; i < msg_len && i < 20; i++) {
+                    fprintf(stderr, "%02x ", byte_buf[msg_ptr + i]);
+                }
+                fprintf(stderr, "\n");
+            }
+            
+            // Send alias with cached IDs and timestamp (more stable than volatile src_id/grp_id)
+            if (msg_len > 0) {
+                std::vector<uint8_t> alias_data(byte_buf + msg_ptr, byte_buf + msg_ptr + msg_len);
+                uint64_t current_time = get_time_ms();
+                uint64_t cache_age_ms = (cached_id_timestamp > 0) ? (current_time - cached_id_timestamp) : 0;
+                
+                std::string msg = "{\"type\": \"harris_alias_p2\", ";
+                msg += "\"slot\": " + std::to_string(d_slotid) + ", ";
+                msg += "\"op25_src_id\": " + std::to_string(cached_src_id) + ", ";
+                msg += "\"op25_grp_id\": " + std::to_string(cached_grp_id) + ", ";
+                msg += "\"cache_age_ms\": " + std::to_string(cache_age_ms) + ", ";
+                msg += "\"blocks\": {\"0\": \"" + uint8_vector_to_hex_string(alias_data) + "\"}";
+                msg += "}";
+                
+				if (d_debug >= 10) {			
+					fprintf(stderr, "    Cached IDs: src=%ld, grp=%ld, slot=%d, cache_age=%lums\n", 
+							cached_src_id, cached_grp_id, d_slotid, (unsigned long)cache_age_ms);
+					fprintf(stderr, "    Sending Harris P2 alias to recorder: %s\n", msg.c_str());
+				}
+				send_msg(msg, M_P25_JSON_DATA);
+			}
 		}
 
 		// Generic message processing
@@ -524,8 +697,8 @@ int p25p2_tdma::handle_acch_frame(const uint8_t dibits[], bool fast, bool is_lcc
 
 void p25p2_tdma::handle_voice_frame(const uint8_t dibits[], int slot, int voice_subframe)
 {
-	static const int NSAMP_OUTPUT=160;
-	audio_samples *samples = NULL;
+	int16_t samples_buf[IMBE_SAMPLES_PER_FRAME];
+	memset(samples_buf, 0, sizeof(samples_buf));
 	packed_codeword p_cw;
     bool audio_valid = !encrypted();
 	int u[4];
@@ -534,7 +707,7 @@ void p25p2_tdma::handle_voice_frame(const uint8_t dibits[], int slot, int voice_
 	int16_t snd;
 	int K;
 	int rc = -1;
-	frame_type fr_type;
+	frame_type fr_type = FT_4V_0;
 
 	// Deinterleave and figure out frame type:
 	errs = vf.process_vcw(&errs_mp, dibits, b, u);
@@ -570,61 +743,70 @@ void p25p2_tdma::handle_voice_frame(const uint8_t dibits[], int slot, int voice_
 		}
 		vf.pack_cw(p_cw, u);
 		audio_valid = crypt_algs.process(p_cw, fr_type, voice_subframe);
-		if (!audio_valid)
-			return;
-        vf.unpack_cw(p_cw, u);  // unpack plaintext codewords
-        vf.unpack_b(b, u);      // for unencrypted traffic this is done inside vf.process_vcw()
+		if (audio_valid) {
+			vf.unpack_cw(p_cw, u);  // unpack plaintext codewords
+			vf.unpack_b(b, u);      // for unencrypted traffic this is done inside vf.process_vcw()
+		} else {
+		// For encrypted voice without a valid key, push silent audio frames
+        // If monitoring for metadata, this will allow tags to pass and preserve call flow
+		memset(samples_buf, 0, sizeof(samples_buf));
+		}
 	}
 
-	rc = mbe_dequantizeAmbeTone(&tone_mp, &errs_mp, u);
-	if (rc >= 0) {					// Tone Frame
-		if (rc == 0) {                  // Valid Tone
-			tone_frame = true;
-			mbe_err_cnt = 0;
-		} else {                        // Tone Erasure with Frame Repeat
-			if ((++mbe_err_cnt < 4) && tone_frame) {
+	if (voice_codec_cb_) {
+		uint32_t params[4] = {(uint32_t)u[0], (uint32_t)u[1], (uint32_t)u[2], (uint32_t)u[3]};
+		voice_codec_cb_(1 /*CODEC_P25_AMBE*/, grp_id,
+		                (cached_src_id > 0) ? (uint32_t)cached_src_id : 0,
+		                params, 4, (int)errs, voice_codec_cb_data_);
+	}
+
+	// Only dequantize and synthesize if we have valid audio (decrypted or unencrypted)
+	if (audio_valid) {
+		rc = mbe_dequantizeAmbeTone(&tone_mp, &errs_mp, u);
+		if (rc >= 0) {					// Tone Frame
+			if (rc == 0) {                  // Valid Tone
+				tone_frame = true;
+				mbe_err_cnt = 0;
+			} else {                        // Tone Erasure with Frame Repeat
+				if ((++mbe_err_cnt < 4) && tone_frame) {
+					mbe_useLastMbeParms(&cur_mp, &prev_mp);
+					rc = 0;
+				} else {
+					tone_frame = false;     // Mute audio output after 3 successive Frame Repeats
+				}
+			}
+		} else {
+			rc = mbe_dequantizeAmbe2250Parms (&cur_mp, &prev_mp, &errs_mp, b);
+			if (rc == 0) {				// Voice Frame
+				tone_frame = false;
+				mbe_err_cnt = 0;
+			} else if ((++mbe_err_cnt < 4) && !tone_frame) {// Erasure with Frame Repeat per TIA-102.BABA.5.6
 				mbe_useLastMbeParms(&cur_mp, &prev_mp);
 				rc = 0;
 			} else {
 				tone_frame = false;     // Mute audio output after 3 successive Frame Repeats
 			}
-        }
-	} else {
-		rc = mbe_dequantizeAmbe2250Parms (&cur_mp, &prev_mp, &errs_mp, b);
-		if (rc == 0) {				// Voice Frame
-			tone_frame = false;
-			mbe_err_cnt = 0;
-		} else if ((++mbe_err_cnt < 4) && !tone_frame) {// Erasure with Frame Repeat per TIA-102.BABA.5.6
-			mbe_useLastMbeParms(&cur_mp, &prev_mp);
-			rc = 0;
-		} else {
-			tone_frame = false;         // Mute audio output after 3 successive Frame Repeats
 		}
-	}
 
-	// Synthesize tones or speech as long as dequantization was successful and overall error rate is below threshold
-	if ((rc == 0) && (errs_mp.ER <= 0.096)) {
-		if (tone_frame) {
-			software_decoder.decode_tone(tone_mp.ID, tone_mp.AD, &tone_mp.n);
-			samples = software_decoder.audio();
-		} else {
-			K = 12;
-			if (cur_mp.L <= 36)
-				K = int(float(cur_mp.L + 2.0) / 3.0);
-			software_decoder.decode_tap(cur_mp.L, K, cur_mp.w0, &cur_mp.Vl[1], &cur_mp.Ml[1]);
-			samples = software_decoder.audio();
+		// Synthesize tones or speech as long as dequantization was successful and overall error rate is below threshold
+		if ((rc == 0) && (errs_mp.ER <= 0.096)) {
+			if (tone_frame) {
+				software_decoder.decode_tone(samples_buf, tone_mp.ID, tone_mp.AD, &tone_mp.n);
+			} else if(d_soft_vocoder) {
+				K = 12;
+				if (cur_mp.L <= 36)
+					K = int(float(cur_mp.L + 2.0) / 3.0);
+				software_decoder.decode_tap(samples_buf, cur_mp.L, K, cur_mp.w0, &cur_mp.Vl[1], &cur_mp.Ml[1]);
+			} else {
+				vocoder.decode_tap(samples_buf, cur_mp.L, cur_mp.w0, &cur_mp.Vl[1], &cur_mp.Ml[1]);
+			}
 		}
 	}
 
 	// Populate output buffer with either audio samples or silence
 	write_bufp = 0;
-	for (int i=0; i < NSAMP_OUTPUT; i++) {
-		if (samples && (samples->size() > 0)) {
-			snd = (int16_t)(samples->front());
-			samples->pop_front();
-		} else {
-			snd = 0;
-		}
+	for (int i=0; i < IMBE_SAMPLES_PER_FRAME; i++) {
+		snd = samples_buf[i];
 		output_queue_decode.push_back(snd); // outputs the sound
 		write_buf[write_bufp++] = snd & 0xFF ;
 		write_buf[write_bufp++] = snd >> 8;
@@ -632,12 +814,6 @@ void p25p2_tdma::handle_voice_frame(const uint8_t dibits[], int slot, int voice_
 	if (d_do_audio_output && (write_bufp >= 0)) { 
 		op25audio.send_audio(write_buf, write_bufp);
 		write_bufp = 0;
-	}
-
-	// This should never happen; audio samples should never be left in buffer
-	if (software_decoder.audio()->size() != 0) {
-		fprintf(stderr, "%s p25p2_tdma::handle_voice_frame(): residual audio sample buffer non-zero (len=%lu)\n", logts.get(d_msgq_id), software_decoder.audio()->size());
-		software_decoder.audio()->clear();
 	}
 
 	mbe_moveMbeParms (&cur_mp, &prev_mp);

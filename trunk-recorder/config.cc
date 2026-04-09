@@ -14,6 +14,9 @@ namespace sinks = boost::log::sinks;
 
 using namespace std;
 
+// Global log sink for SIGHUP rotation support
+boost::shared_ptr<sinks::synchronous_sink<sinks::text_file_backend>> global_log_sink;
+
 void set_logging_level(std::string log_level) {
   boost::log::trivial::severity_level sev_level = boost::log::trivial::info;
 
@@ -67,20 +70,27 @@ void setup_console_log(std::string log_color, std::string time_fmt) {
   console_sink->imbue(loc);
 }
 
-void setup_file_log(std::string log_dir, std::string log_color, std::string time_fmt) {
-  boost::shared_ptr<sinks::synchronous_sink<sinks::text_file_backend>> log_sink = logging::add_file_log(
-      keywords::file_name = log_dir + "/%m-%d-%Y_%H%M_%2N.log",
-      keywords::rotation_size = 100 * 1024 * 1024,
-      keywords::time_based_rotation = sinks::file::rotation_at_time_point(0, 0, 0),
-      keywords::auto_flush = true);
+void setup_file_log(std::string log_dir, std::string log_color, std::string time_fmt, bool syslog_friendly) {
+  if (syslog_friendly) {
+    global_log_sink = logging::add_file_log(
+        keywords::file_name = log_dir + "/trunk-recorder.log",
+        keywords::open_mode = std::ios_base::app,
+        keywords::auto_flush = true);
+  } else {
+    global_log_sink = logging::add_file_log(
+        keywords::file_name = log_dir + "/%m-%d-%Y_%H%M_%2N.log",
+        keywords::rotation_size = 100 * 1024 * 1024,
+        keywords::time_based_rotation = sinks::file::rotation_at_time_point(0, 0, 0),
+        keywords::auto_flush = true);
+  }
 
   if ((log_color == "logfile") || (log_color == "all")) {
-    log_sink->set_formatter(logging::expressions::format("[%1%] (%2%)   %3%") %
+    global_log_sink->set_formatter(logging::expressions::format("[%1%] (%2%)   %3%") %
                             logging::expressions::format_date_time<boost::posix_time::ptime>("TimeStamp", time_fmt) %
                             logging::expressions::attr<logging::trivial::severity_level>("Severity") %
                             logging::expressions::smessage);
   } else {
-    log_sink->set_formatter(logging::expressions::format("[%1%] (%2%)   %3%") %
+    global_log_sink->set_formatter(logging::expressions::format("[%1%] (%2%)   %3%") %
                             logging::expressions::format_date_time<boost::posix_time::ptime>("TimeStamp", time_fmt) %
                             logging::expressions::attr<logging::trivial::severity_level>("Severity") %
                             logging::expressions::wrap_formatter(NoColorLoggingFormatter{}));
@@ -94,6 +104,8 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
   json data;
   int sys_count = 0;
   int source_count = 0;
+
+  config.config_file = config_file;
 
   try {
     std::ifstream f(config_file);
@@ -132,8 +144,9 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
 
     config.log_file = data.value("logFile", false);
     config.log_dir = data.value("logDir", "logs");
+    config.syslog_friendly = data.value("syslogFriendly", false);
     if (config.log_file) {
-      setup_file_log(config.log_dir, config.log_color, "%Y-%m-%d %H:%M:%S.%f");
+      setup_file_log(config.log_dir, config.log_color, "%Y-%m-%d %H:%M:%S.%f", config.syslog_friendly);
     }
 
     double config_ver = data.value("ver", 0.0);
@@ -151,6 +164,7 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
 
     BOOST_LOG_TRIVIAL(info) << "Log to File: " << config.log_file;
     BOOST_LOG_TRIVIAL(info) << "Log Directory: " << config.log_dir;
+    BOOST_LOG_TRIVIAL(info) << "Syslog Friendly Mode: " << config.syslog_friendly;
 
     std::string defaultTempDir = boost::filesystem::current_path().string();
 
@@ -165,6 +179,9 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
     }
 
     BOOST_LOG_TRIVIAL(info) << "Temporary Transmission Directory: " << config.temp_dir;
+
+    config.archive_files_on_failure = data.value("archiveFilesOnFailure", false);
+    BOOST_LOG_TRIVIAL(info) << "Archive Files on Failure: " << config.archive_files_on_failure;
 
     config.capture_dir = data.value("captureDir", boost::filesystem::current_path().string());
     pos = config.capture_dir.find_last_of("/");
@@ -213,6 +230,8 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
     }
     config.frequency_format = frequency_format;
     BOOST_LOG_TRIVIAL(info) << "Frequency format: " << get_frequency_format();
+    config.filename_format = data.value("filenameFormat", "");
+    BOOST_LOG_TRIVIAL(info) << "Filename Format: " << (config.filename_format.empty() ? "(default)" : config.filename_format);
 
     statusAsString = data.value("statusAsString", statusAsString);
     BOOST_LOG_TRIVIAL(info) << "Status as String: " << statusAsString;
@@ -349,14 +368,98 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
         BOOST_LOG_TRIVIAL(info) << "Upload Script: " << system->get_upload_script();
         system->set_compress_wav(element.value("compressWav", true));
         BOOST_LOG_TRIVIAL(info) << "Compress .wav Files: " << system->get_compress_wav();
+        system->set_audio_bitrate(element.value("compressBitrate", "32k"));
+        BOOST_LOG_TRIVIAL(info) << "Audio Bitrate: " << system->get_audio_bitrate();
         system->set_call_log(element.value("callLog", true));
         BOOST_LOG_TRIVIAL(info) << "Call Log: " << system->get_call_log();
         system->set_audio_archive(element.value("audioArchive", true));
         BOOST_LOG_TRIVIAL(info) << "Audio Archive: " << system->get_audio_archive();
         system->set_transmission_archive(element.value("transmissionArchive", false));
         BOOST_LOG_TRIVIAL(info) << "Transmission Archive: " << system->get_transmission_archive();
+                bool audio_postprocess_enabled = false;
+        int audio_highpass_hz = 0;
+        int audio_lowpass_hz = 0;
+        int audio_bandreject_hz = 0;
+        int audio_bandreject_width_hz = 0;
+        bool audio_loudnorm = true;
+        bool audio_loudnorm_two_pass = true;
+        double audio_loudnorm_i = -16.0;
+        double audio_loudnorm_tp = -0.1;
+        double audio_loudnorm_lra = 11.0;
+        std::string audio_ffmpeg_filter = "";
+
+        if (element.contains("audio_postprocess") && element["audio_postprocess"].is_object()) {
+          const json &audio_post = element["audio_postprocess"];
+
+          audio_postprocess_enabled = audio_post.value("enabled", false);
+          audio_highpass_hz = audio_post.value("highpass_hz", 0);
+          audio_lowpass_hz = audio_post.value("lowpass_hz", 0);
+          audio_bandreject_hz = audio_post.value("bandreject_hz", 0);
+          audio_bandreject_width_hz = audio_post.value("bandreject_width_hz", 0);
+
+          audio_loudnorm = audio_post.value("loudnorm", true);
+          audio_loudnorm_two_pass = audio_post.value("loudnorm_two_pass", true);
+          audio_loudnorm_i = audio_post.value("loudnorm_i", -16.0);
+          audio_loudnorm_tp = audio_post.value("loudnorm_tp", -0.1);
+          audio_loudnorm_lra = audio_post.value("loudnorm_lra", 11.0);
+
+          audio_ffmpeg_filter = audio_post.value("ffmpeg_filter", "");
+        }
+
+        if (audio_highpass_hz < 0) {
+          BOOST_LOG_TRIVIAL(warning) << "audio_postprocess.highpass_hz cannot be negative, forcing to 0";
+          audio_highpass_hz = 0;
+        }
+
+        if (audio_lowpass_hz < 0) {
+          BOOST_LOG_TRIVIAL(warning) << "audio_postprocess.lowpass_hz cannot be negative, forcing to 0";
+          audio_lowpass_hz = 0;
+        }
+
+        if (audio_bandreject_hz < 0) {
+          BOOST_LOG_TRIVIAL(warning) << "audio_postprocess.bandreject_hz cannot be negative, forcing to 0";
+          audio_bandreject_hz = 0;
+        }
+
+        if (audio_bandreject_width_hz < 0) {
+          BOOST_LOG_TRIVIAL(warning) << "audio_postprocess.bandreject_width_hz cannot be negative, forcing to 0";
+          audio_bandreject_width_hz = 0;
+        }
+
+        system->set_audio_postprocess_enabled(audio_postprocess_enabled);
+        system->set_audio_highpass_hz(audio_highpass_hz);
+        system->set_audio_lowpass_hz(audio_lowpass_hz);
+        system->set_audio_bandreject_hz(audio_bandreject_hz);
+        system->set_audio_bandreject_width_hz(audio_bandreject_width_hz);
+        system->set_audio_loudnorm(audio_loudnorm);
+        system->set_audio_loudnorm_two_pass(audio_loudnorm_two_pass);
+        system->set_audio_loudnorm_i(audio_loudnorm_i);
+        system->set_audio_loudnorm_tp(audio_loudnorm_tp);
+        system->set_audio_loudnorm_lra(audio_loudnorm_lra);
+        system->set_audio_ffmpeg_filter(audio_ffmpeg_filter);
+
+        BOOST_LOG_TRIVIAL(info) << "Audio Postprocess Enabled: " << system->get_audio_postprocess_enabled();
+        BOOST_LOG_TRIVIAL(info) << "Audio Highpass (Hz): " << system->get_audio_highpass_hz();
+        BOOST_LOG_TRIVIAL(info) << "Audio Lowpass (Hz): " << system->get_audio_lowpass_hz();
+        BOOST_LOG_TRIVIAL(info) << "Audio Bandreject (Hz): " << system->get_audio_bandreject_hz();
+        BOOST_LOG_TRIVIAL(info) << "Audio Bandreject Width (Hz): " << system->get_audio_bandreject_width_hz();
+        BOOST_LOG_TRIVIAL(info) << "Audio Loudnorm: " << system->get_audio_loudnorm();
+        BOOST_LOG_TRIVIAL(info) << "Audio Loudnorm Two Pass: " << system->get_audio_loudnorm_two_pass();
+        BOOST_LOG_TRIVIAL(info) << "Audio Loudnorm I: " << system->get_audio_loudnorm_i();
+        BOOST_LOG_TRIVIAL(info) << "Audio Loudnorm TP: " << system->get_audio_loudnorm_tp();
+        BOOST_LOG_TRIVIAL(info) << "Audio Loudnorm LRA: " << system->get_audio_loudnorm_lra();
+
+        if (!system->get_audio_ffmpeg_filter().empty()) {
+          BOOST_LOG_TRIVIAL(info) << "Audio FFmpeg Filter Override: " << system->get_audio_ffmpeg_filter();
+        } else {
+          BOOST_LOG_TRIVIAL(info) << "Audio FFmpeg Filter Override: <none>";
+        }
         system->set_unit_tags_file(element.value("unitTagsFile", ""));
         BOOST_LOG_TRIVIAL(info) << "Unit Tags File: " << system->get_unit_tags_file();
+        system->set_unit_tags_ota_file(element.value("unitTagsOTA", ""));
+        BOOST_LOG_TRIVIAL(info) << "Unit Tags OTA File: " << system->get_unit_tags_ota_file();
+        system->set_unit_tags_mode(element.value("unitTagsMode", "user"));
+        BOOST_LOG_TRIVIAL(info) << "Unit Tags Mode: " << system->get_unit_tags_mode();
         system->set_record_unknown(element.value("recordUnknown", true));
         BOOST_LOG_TRIVIAL(info) << "Record Unknown Talkgroups: " << system->get_record_unknown();
         system->set_mdc_enabled(element.value("decodeMDC", false));
@@ -406,6 +509,8 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
 
         system->set_hideEncrypted(element.value("hideEncrypted", system->get_hideEncrypted()));
         BOOST_LOG_TRIVIAL(info) << "Hide Encrypted Talkgroups: " << system->get_hideEncrypted();
+        system->set_monitorEncrypted(element.value("monitorEncrypted", system->get_monitorEncrypted()));
+        BOOST_LOG_TRIVIAL(info) << "Monitor Encrypted Calls: " << system->get_monitorEncrypted();
         system->set_hideUnknown(element.value("hideUnknownTalkgroups", system->get_hideUnknown()));
         BOOST_LOG_TRIVIAL(info) << "Hide Unknown Talkgroups: " << system->get_hideUnknown();
         system->set_min_duration(element.value("minDuration", 0.0));
@@ -420,6 +525,10 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
         BOOST_LOG_TRIVIAL(info) << "Multiple Site System Name: " << system->get_multiSiteSystemName();
         system->set_multiSiteSystemNumber(element.value("multiSiteSystemNumber", 0));
         BOOST_LOG_TRIVIAL(info) << "Multiple Site System Number: " << system->get_multiSiteSystemNumber();
+        system->set_filename_format(element.value("filenameFormat", ""));
+        if (!system->get_filename_format().empty()) {
+          BOOST_LOG_TRIVIAL(info) << "Filename Format: " << system->get_filename_format();
+        }
 
         if (!system->get_compress_wav()) {
           if ((system->get_api_key().length() > 0) || (system->get_bcfy_api_key().length() > 0)) {
@@ -478,18 +587,19 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
           double rate = element.value("rate", 0.0);
           double error = element.value("error", 0.0);
           double ppm = element.value("ppm", 0.0);
+          bool autotune = element.value("autoTune", false);
           bool agc = element.value("agc", false);
-          int gain = element.value("gain", 0);
-          int if_gain = element.value("ifGain", 0);
-          int bb_gain = element.value("bbGain", 0);
-          int mix_gain = element.value("mixGain", 0);
-          int lna_gain = element.value("lnaGain", 0);
-          int pga_gain = element.value("pgaGain", 0);
-          int tia_gain = element.value("tiaGain", 0);
-          int amp_gain = element.value("ampGain", 0);
-          int vga_gain = element.value("vgaGain", 0);
-          int vga1_gain = element.value("vga1Gain", 0);
-          int vga2_gain = element.value("vga2Gain", 0);
+          double gain = element.value("gain", 0.0);
+          double if_gain = element.value("ifGain", 0.0);
+          double bb_gain = element.value("bbGain", 0.0);
+          double mix_gain = element.value("mixGain", 0.0);
+          double lna_gain = element.value("lnaGain", 0.0);
+          double pga_gain = element.value("pgaGain", 0.0);
+          double tia_gain = element.value("tiaGain", 0.0);
+          double amp_gain = element.value("ampGain", 0.0);
+          double vga_gain = element.value("vgaGain", 0.0);
+          double vga1_gain = element.value("vga1Gain", 0.0);
+          double vga2_gain = element.value("vga2Gain", 0.0);
 
           std::string antenna = element.value("antenna", "");
 
@@ -497,18 +607,19 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
           BOOST_LOG_TRIVIAL(info) << "Rate: " << FormatSamplingRate(element.value("rate", 0.0));
           BOOST_LOG_TRIVIAL(info) << "Error: " << element.value("error", 0.0);
           BOOST_LOG_TRIVIAL(info) << "PPM Error: " << element.value("ppm", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "P25 Autotune: " << element.value("autoTune", false);
           BOOST_LOG_TRIVIAL(info) << "Auto gain control: " << element.value("agc", false);
-          BOOST_LOG_TRIVIAL(info) << "Gain: " << element.value("gain", 0);
-          BOOST_LOG_TRIVIAL(info) << "IF Gain: " << element.value("ifGain", 0);
-          BOOST_LOG_TRIVIAL(info) << "BB Gain: " << element.value("bbGain", 0);
-          BOOST_LOG_TRIVIAL(info) << "LNA Gain: " << element.value("lnaGain", 0);
-          BOOST_LOG_TRIVIAL(info) << "PGA Gain: " << element.value("pgaGain", 0);
-          BOOST_LOG_TRIVIAL(info) << "TIA Gain: " << element.value("tiaGain", 0);
-          BOOST_LOG_TRIVIAL(info) << "MIX Gain: " << element.value("mixGain", 0);
-          BOOST_LOG_TRIVIAL(info) << "AMP Gain: " << element.value("ampGain", 0);
-          BOOST_LOG_TRIVIAL(info) << "VGA Gain: " << element.value("vgaGain", 0);
-          BOOST_LOG_TRIVIAL(info) << "VGA1 Gain: " << element.value("vga1Gain", 0);
-          BOOST_LOG_TRIVIAL(info) << "VGA2 Gain: " << element.value("vga2Gain", 0);
+          BOOST_LOG_TRIVIAL(info) << "Gain: " << element.value("gain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "IF Gain: " << element.value("ifGain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "BB Gain: " << element.value("bbGain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "LNA Gain: " << element.value("lnaGain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "PGA Gain: " << element.value("pgaGain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "TIA Gain: " << element.value("tiaGain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "MIX Gain: " << element.value("mixGain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "AMP Gain: " << element.value("ampGain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "VGA Gain: " << element.value("vgaGain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "VGA1 Gain: " << element.value("vga1Gain", 0.0);
+          BOOST_LOG_TRIVIAL(info) << "VGA2 Gain: " << element.value("vga2Gain", 0.0);
           BOOST_LOG_TRIVIAL(info) << "Idle Silence: " << element.value("silenceFrame", 0);
 
           if ((driver == "osmosdr") && (long(rate) % 24000 != 0)) {
@@ -530,6 +641,8 @@ bool load_config(string config_file, Config &config, gr::top_block_sptr &tb, std
           if (element.contains("signalDetectorThreshold")) {
             source->set_signal_detector_threshold(element["signalDetectorThreshold"]);
           }
+
+          source->set_autotune_source(autotune);
 
           if (element.contains("gainSettings")) {
             for (auto it = element["gainSettings"].begin(); it != element["gainSettings"].end(); ++it) {

@@ -305,6 +305,7 @@ class Simple_Stream : public Plugin_Api {
             json json_object;
             std::string json_string;
             std::vector<boost::asio::const_buffer> send_buffer;
+            uint32_t json_length = 0;
             if (stream.sendJSON==true){
               //create JSON metadata
               json_object = {
@@ -321,7 +322,7 @@ class Simple_Stream : public Plugin_Api {
                 json_object["patched_talkgroup_tags"] = patched_talkgroup_tags;
               }
               json_string = json_object.dump();
-              uint32_t json_length = json_string.length();  //determine length in bytes
+              json_length = json_string.length();  //determine length in bytes
               //BOOST_LOG_TRIVIAL(debug) << "json_length is " <<json_length <<" bytes";
               send_buffer.push_back(buffer(&json_length,4));  //prepend length of the json data
               send_buffer.push_back(buffer(json_string));  //prepend json data
@@ -399,6 +400,7 @@ class Simple_Stream : public Plugin_Api {
               json json_object;
               std::string json_string;
               std::vector<boost::asio::const_buffer> send_buffer;
+              uint32_t json_length = 0;
               if (stream.sendJSON==true){
                 //create JSON metadata
                 json_object = {
@@ -413,7 +415,7 @@ class Simple_Stream : public Plugin_Api {
                    {"event","call_start"},
                 };
                 json_string = json_object.dump();
-                uint32_t json_length = json_string.length();  //determine length in bytes
+                json_length = json_string.length();  //determine length in bytes
                 send_buffer.push_back(buffer(&json_length,4));  //prepend length of the json data
                 send_buffer.push_back(buffer(json_string));  //prepend json data
               }
@@ -470,6 +472,7 @@ class Simple_Stream : public Plugin_Api {
               json json_object;
               std::string json_string;
               std::vector<boost::asio::const_buffer> send_buffer;
+              uint32_t json_length = 0;
               if (stream.sendJSON==true){
                 //create JSON metadata
                 json_object = {
@@ -480,7 +483,7 @@ class Simple_Stream : public Plugin_Api {
                    {"event","call_end"},
                 };
                 json_string = json_object.dump();
-                uint32_t json_length = json_string.length();  //determine length in bytes
+                json_length = json_string.length();  //determine length in bytes
                 send_buffer.push_back(buffer(&json_length,4));  //prepend length of the json data
                 send_buffer.push_back(buffer(json_string));  //prepend json data
               }

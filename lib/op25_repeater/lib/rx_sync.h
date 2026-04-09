@@ -40,6 +40,7 @@
 #include "p25p2_vf.h"
 #include "mbelib.h"
 #include "ambe.h"
+#include "imbe_vocoder/imbe_vocoder.h"
 
 #include "ysf_const.h"
 #include "dmr_const.h"
@@ -124,8 +125,10 @@ public:
 	void set_nac(int nac);
 	void set_debug(int debug);
 	int get_src_id(int slot);
+	int get_dst_id(int slot);
+	int get_cc(int slot);
 	std::pair<bool,long> get_terminated(int slot);
-	rx_sync(const char * options, log_ts& logger, int debug, int msgq_id, gr::msg_queue::sptr queue, std::array<std::deque<int16_t>, 2> &output_queue);
+	rx_sync(const char * options, log_ts& logger, int debug, int msgq_id, gr::msg_queue::sptr queue, std::array<std::deque<int16_t>, 2> &output_queue, bool d_soft_vocoder);
 	~rx_sync();
 
 private:
@@ -162,7 +165,9 @@ private:
 	mbe_errs errs_mp[2];
 	mbe_tone tone_mp[2];
 	int mbe_err_cnt[2];
+	bool d_soft_vocoder;
 	software_imbe_decoder d_software_decoder[2];
+	imbe_vocoder d_imbe_vocoder[2];
 	std::deque<int16_t> d_output_queue[2];
 	dmr_cai dmr;
 	int d_msgq_id;
@@ -173,6 +178,13 @@ private:
 	log_ts& logts;
 	std::array<std::deque<int16_t>, 2> &output_queue;
 	int src_id[2];
+
+	typedef void (*voice_codec_cb_t)(int codec_type, long tgid, uint32_t src_id, const uint32_t *params, int param_count, int errs, void *user_data);
+	voice_codec_cb_t voice_codec_cb_;
+	void *voice_codec_cb_data_;
+
+public:
+	void set_voice_codec_callback(voice_codec_cb_t cb, void *user_data);
 };
 
     } // end namespace op25_repeater

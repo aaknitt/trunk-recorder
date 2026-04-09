@@ -73,6 +73,10 @@ public:
   double get_output_sample_rate();
   State get_state();
   gr::op25_repeater::p25_frame_assembler::sptr get_transmission_sink();
+  void check_message_queue();
 
+private:
+  void handle_alias_message(const nlohmann::json& j);
+  static void voice_codec_cb_handler(int codec_type, long tgid, uint32_t src_id, const uint32_t *params, int param_count, int errs, void *user_data);
 };
 #endif

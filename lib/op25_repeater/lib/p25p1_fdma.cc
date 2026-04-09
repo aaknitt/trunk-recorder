@@ -40,6 +40,14 @@
 #include "rs.h"
 #include "p25_crypt_algs.h"
 #include "imbe_vocoder/imbe_vocoder.h"
+#include <sys/time.h>
+
+// Helper to get current time in milliseconds since epoch
+static uint64_t get_time_ms() {
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (uint64_t)(tv.tv_sec) * 1000 + (uint64_t)(tv.tv_usec) / 1000;
+}
 
 namespace gr {
     namespace op25_repeater {
@@ -216,10 +224,17 @@ namespace gr {
             logts(logger),
             crypt_algs(logger, debug, msgq_id),
             ess_keyid(0),
+            curr_src_id(-1),
+            curr_grp_id(-1),
+            cached_src_id(-1),
+            cached_grp_id(-1),
+            cached_id_timestamp(0),
             ess_algid(0x80),
             vf_tgid(0),
 			terminate_call(std::pair<bool,long>(false,0)),
-            p1voice_decode((debug > 0), udp, output_queue)
+            p1voice_decode((debug > 0), udp, output_queue),
+            voice_codec_cb_(NULL),
+            voice_codec_cb_data_(NULL)
         {
 			rx_status.error_count = 0;
 			rx_status.total_len = 0;
@@ -315,6 +330,7 @@ namespace gr {
                 vf_tgid   = ((HB[j+5] & 0x0f) << 12) + (HB[j+6] << 6) +  HB[j+7];				// 16 bit TGID
 
                 curr_grp_id = vf_tgid;
+                cached_grp_id = vf_tgid;  // Update persistent cache
                 if (d_debug >= 10) {
                     fprintf (stderr, "ESS: tgid=%d, mfid=%x, algid=%x, keyid=%x, mi=%02x %02x %02x %02x %02x %02x %02x %02x %02x",
                             vf_tgid, MFID, ess_algid, ess_keyid,
@@ -485,7 +501,7 @@ namespace gr {
             }
 
             if (pb == 0) { // only decode if unencrypted
-                if ((sf == 0) && ((lcw[1] == 0x00) || (lcw[1] == 0x01) || (lcw[1] == 0x90))) {	// sf=0, explicit MFID in standard or Motorola format
+                if ((sf == 0) && ((lcw[1] == 0x00) || (lcw[1] == 0x01) || (lcw[1] == 0x90) || (lcw[1] == 0xa4))) {	// sf=0, explicit MFID in standard, Motorola, or Harris format
                     switch (lco) {
                         case 0x00: { // Group Voice Channel User
                             uint16_t grpaddr = (lcw[4] << 8) + lcw[5];
@@ -493,10 +509,166 @@ namespace gr {
 
                             curr_src_id = srcaddr;
                             curr_grp_id = grpaddr;
+                            cached_src_id = srcaddr;  // Update persistent cache
+                            cached_grp_id = grpaddr;  // Update persistent cache
+                            cached_id_timestamp = get_time_ms();  // Record when IDs were cached
+                            
                             s = "{\"srcaddr\" : " + std::to_string(srcaddr) + ", \"grpaddr\": " + std::to_string(grpaddr) + "}";
                             send_msg(s, -3);
                             if (d_debug >= 10)
                                 fprintf(stderr, ", srcaddr=%d, grpaddr=%d", srcaddr, grpaddr);
+                            break;
+                        }
+                        case 0x15: { // Motorola alias header
+                            if (lcw[1] == 0x90) {
+                                int messages = lcw[4] & 0xf;
+                                int id_sequence = lcw[7] >> 4;
+
+                                alias_buffer[0] = lcw;
+                                for (int i = 1; i <= messages; i++) {
+                                    alias_buffer[i] = std::vector<uint8_t>(9, 0);
+                                }
+                            }
+                            break;
+                        }
+                        case 0x17: { // Motorola alias messages
+                            if (lcw[1] == 0x90) {
+                                // get message count
+                                int messages = 0;
+                                int header_sequence = -1;
+
+                                if (alias_buffer[0].size() >= 8) {
+                                    messages = alias_buffer[0][4] & 0xf;
+                                    header_sequence = alias_buffer[0][7] >> 4;
+                                }
+
+                                int message = lcw[2] & 0xf;
+                                int msg_sequence = lcw[3] >> 4;
+
+                                // Validate message index is within bounds
+                                if ((message > 0 && message < 10) && (message <= messages) && (msg_sequence == header_sequence)) {
+                                    alias_buffer[message] = lcw;
+
+                                    // When all messages received, send raw buffer to recorder for decoding
+                                    if (message == messages && messages > 0 && messages < (int)alias_buffer.size()) {
+                                        std::string msg = "{\"type\": \"motorola_alias_p1\", \"messages\": " + std::to_string(messages) + ", \"blocks\": {";
+                                        for (int i = 0; i <= messages && i < 10; i++) {
+                                            if (!alias_buffer[i].empty()) {
+                                                if (i > 0) msg += ", ";
+                                                msg += "\"" + std::to_string(i) + "\": \"" + uint8_vector_to_hex_string(alias_buffer[i]) + "\"";
+                                            }
+                                        }
+                                        msg += "}}";
+                                        send_msg(msg, M_P25_JSON_DATA);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        case 0x32: { // Harris User Alias Part A (LCO 50, odd conveyance)
+                            if (lcw[1] == 0xa4) {
+                                if (d_debug >= 10) {
+                                    fprintf(stderr, "\n*** HARRIS P1 ALIAS PART A (ODD) RECEIVED ***\n");
+                                    fprintf(stderr, "    LCO=0x32(50), Chars 0-6 (odd-numbered conveyance)\n");
+                                    fprintf(stderr, "    Raw LCW: %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                            lcw[0], lcw[1], lcw[2], lcw[3], lcw[4], lcw[5], lcw[6], lcw[7], lcw[8]);
+                                }
+                                alias_buffer[0] = lcw;  // Store Part A (odd)
+                            }
+                            break;
+                        }
+                        case 0x33: { // Harris User Alias Part B (LCO 51, odd conveyance)
+                            if (lcw[1] == 0xa4 && alias_buffer[0].size() >= 9) {
+                                if (d_debug >= 10) {
+                                    fprintf(stderr, "\n*** HARRIS P1 ALIAS PART B (ODD) RECEIVED ***\n");
+                                    fprintf(stderr, "    LCO=0x33(51), Chars 7-13 (odd-numbered conveyance)\n");
+                                    fprintf(stderr, "    Raw LCW: %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                            lcw[0], lcw[1], lcw[2], lcw[3], lcw[4], lcw[5], lcw[6], lcw[7], lcw[8]);
+                                }
+                                alias_buffer[1] = lcw;  // Store Part B (odd)
+                                
+                                // Concatenate Part A + Part B (14 chars total)
+                                std::vector<uint8_t> combined;
+                                combined.insert(combined.end(), alias_buffer[0].begin() + 2, alias_buffer[0].begin() + 9); // Part A: chars 0-6
+                                combined.insert(combined.end(), alias_buffer[1].begin() + 2, alias_buffer[1].begin() + 9); // Part B: chars 7-13
+                                
+                                // Send alias with cached IDs and timestamp
+                                uint64_t current_time = get_time_ms();
+                                uint64_t cache_age_ms = (cached_id_timestamp > 0) ? (current_time - cached_id_timestamp) : 0;
+                                
+                                std::string msg = "{\"type\": \"harris_alias_p1\", ";
+                                msg += "\"op25_src_id\": " + std::to_string(cached_src_id) + ", ";
+                                msg += "\"op25_grp_id\": " + std::to_string(cached_grp_id) + ", ";
+                                msg += "\"cache_age_ms\": " + std::to_string(cache_age_ms) + ", ";
+                                msg += "\"blocks\": {\"0\": \"" + uint8_vector_to_hex_string(combined) + "\"}";
+                                msg += "}";
+                                
+                                if (d_debug >= 10) {
+                                    fprintf(stderr, "    Complete alias: Part A + Part B = 14 chars\n");
+                                    fprintf(stderr, "    Cached IDs: src=%ld, grp=%ld, cache_age=%lums\n", 
+                                            cached_src_id, cached_grp_id, (unsigned long)cache_age_ms);
+                                    fprintf(stderr, "    Sending Harris P1 alias to recorder: %s\n", msg.c_str());
+                                }
+                                send_msg(msg, M_P25_JSON_DATA);
+                                
+                                // Clear odd conveyance buffers
+                                alias_buffer[0].clear();
+                                alias_buffer[1].clear();
+                            }
+                            break;
+                        }
+                        case 0x34: { // Harris User Alias Part A (LCO 52, even conveyance)
+                            if (lcw[1] == 0xa4) {
+                                if (d_debug >= 10) {
+                                    fprintf(stderr, "\n*** HARRIS P1 ALIAS PART A (EVEN) RECEIVED ***\n");
+                                    fprintf(stderr, "    LCO=0x34(52), Chars 0-6 (even-numbered conveyance, redundant)\n");
+                                    fprintf(stderr, "    Raw LCW: %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                            lcw[0], lcw[1], lcw[2], lcw[3], lcw[4], lcw[5], lcw[6], lcw[7], lcw[8]);
+                                }
+                                alias_buffer[2] = lcw;  // Store Part A (even)
+                            }
+                            break;
+                        }
+                        case 0x35: { // Harris User Alias Part B (LCO 53, even conveyance)
+                            if (lcw[1] == 0xa4 && alias_buffer[2].size() >= 9) {
+                                if (d_debug >= 10) {
+                                    fprintf(stderr, "\n*** HARRIS P1 ALIAS PART B (EVEN) RECEIVED ***\n");
+                                    fprintf(stderr, "    LCO=0x35(53), Chars 7-13 (even-numbered conveyance, redundant)\n");
+                                    fprintf(stderr, "    Raw LCW: %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                            lcw[0], lcw[1], lcw[2], lcw[3], lcw[4], lcw[5], lcw[6], lcw[7], lcw[8]);
+                                }
+                                alias_buffer[3] = lcw;  // Store Part B (even)
+                                
+                                // Concatenate Part A + Part B (14 chars total, repeats odd conveyance)
+                                // Concatenate Part A + Part B (14 chars total)
+                                std::vector<uint8_t> combined;
+                                combined.insert(combined.end(), alias_buffer[2].begin() + 2, alias_buffer[2].begin() + 9); // Part A: chars 0-6
+                                combined.insert(combined.end(), alias_buffer[3].begin() + 2, alias_buffer[3].begin() + 9); // Part B: chars 7-13
+                                
+                                // Send alias with cached IDs and timestamp
+                                uint64_t current_time = get_time_ms();
+                                uint64_t cache_age_ms = (cached_id_timestamp > 0) ? (current_time - cached_id_timestamp) : 0;
+                                
+                                std::string msg = "{\"type\": \"harris_alias_p1\", ";
+                                msg += "\"op25_src_id\": " + std::to_string(cached_src_id) + ", ";
+                                msg += "\"op25_grp_id\": " + std::to_string(cached_grp_id) + ", ";
+                                msg += "\"cache_age_ms\": " + std::to_string(cache_age_ms) + ", ";
+                                msg += "\"blocks\": {\"0\": \"" + uint8_vector_to_hex_string(combined) + "\"}";
+                                msg += "}";
+                                
+                                if (d_debug >= 10) {
+                                    fprintf(stderr, "    Complete alias: Part A + Part B = 14 chars (redundant transmission)\n");
+                                    fprintf(stderr, "    Cached IDs: src=%ld, grp=%ld, cache_age=%lums\n", 
+                                            cached_src_id, cached_grp_id, (unsigned long)cache_age_ms);
+                                    fprintf(stderr, "    Sending Harris P1 alias to recorder: %s\n", msg.c_str());
+                                }
+                                
+                                send_msg(msg, M_P25_JSON_DATA);
+                                
+                                // Clear even conveyance buffers
+                                alias_buffer[2].clear();
+                                alias_buffer[3].clear();
+                            }
                             break;
                         }
                     }
@@ -703,7 +875,7 @@ namespace gr {
 					}
 					double error_history_avg = error_history_total / error_history_len;
 
-					double error_history_sqrt;
+					double error_history_sqrt = 0.0;
 					for (int j=0; j<error_history_len; j++){
 						error_history_sqrt += pow((error_history[j] - error_history_avg), 2);
 					}
@@ -722,22 +894,19 @@ namespace gr {
 					// also, 32*9 = 288 byte pkts (for use via UDP)
 					sprintf(s, "%03x %03x %03x %03x %03x %03x %03x %03x\n", u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]);
 
+                    if (voice_codec_cb_) {
+                        voice_codec_cb_(0 /*CODEC_P25_IMBE*/, (long)vf_tgid,
+                                        (cached_src_id > 0) ? (uint32_t)cached_src_id : 0,
+                                        u, 8, (int)errs, voice_codec_cb_data_);
+                    }
+
                     if (d_do_audio_output) {
                         if ( !encrypted()) {
                             // This is the Vocoder that OP25 currently uses.
 
                             if (d_soft_vocoder) {
                                 // This is vocoder that is for half-rate
-                                software_decoder.decode_fullrate(u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], E0, ET);
-                                audio_samples *samples = software_decoder.audio();
-                                for (int i=0; i < SND_FRAME; i++) {
-                                    if (samples->size() > 0) {
-                                        snd[i] = (int16_t)(samples->front());
-                                        samples->pop_front();
-                                    } else {
-                                        snd[i] = 0;
-                                    }
-                                }
+                                software_decoder.decode_fullrate(snd, u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], E0, ET);
                             } else {
 
                                 // This is the older, fullrate vocoder
@@ -745,7 +914,7 @@ namespace gr {
                                 int16_t frame_vector[8];
 
                                 for (int i=0; i < 8; i++) { // Ugh. For compatibility convert imbe params from uint32_t to int16_t
-                                    frame_vector[i] = u[i];
+                                    frame_vector[i] = u[i] & 0xFFFF;
                                 }
                                 frame_vector[7] >>= 1;
                                 vocoder.imbe_decode(frame_vector, snd);
@@ -759,8 +928,15 @@ namespace gr {
                                 }
                             }
                         } else {
+		                    // For encrypted voice without a valid key, push silent audio frames
+                            // If monitoring for metadata, this will allow tags to pass and preserve call flow
+                            if (!op25audio.enabled()) {
+                                for (int i = 0; i < SND_FRAME; i++) {
+                                    output_queue.push_back(0);  // Silent frame
+                                }
+                            }
                             std::string encr = "{\"encrypted\": " + std::to_string(1) + ", \"algid\": " + std::to_string(ess_algid) + ", \"keyid\": " + std::to_string(ess_keyid) + "}";
-                            //send_msg(encr, M_P25_JSON_DATA);
+                            send_msg(encr, M_P25_JSON_DATA);
                         }
                     }
 
@@ -782,6 +958,9 @@ namespace gr {
             if (d_do_audio_output)
                 op25audio.send_audio_flag(op25_audio::DRAIN);
             reset_ess();
+            cached_src_id = -1;
+            cached_grp_id = -1;
+            cached_id_timestamp = 0;
         }
 
         void p25p1_fdma::crypt_reset() {

@@ -80,16 +80,21 @@ namespace gr {
             }
         }
 
+        void frame_assembler_impl::set_voice_codec_callback(voice_codec_cb_t cb, void *user_data) {
+            if (d_sync)
+                d_sync->set_voice_codec_callback(cb, user_data);
+        }
+
         void frame_assembler_impl::set_debug(int debug) {
             if (d_sync)
                 d_sync->set_debug(debug);
         }
 
         frame_assembler::sptr
-            frame_assembler::make(const char* options, int debug, int msgq_id, gr::msg_queue::sptr queue)
+            frame_assembler::make(const char* options, int debug, int msgq_id, gr::msg_queue::sptr queue, bool d_soft_vocoder)
             {
                 return gnuradio::get_initial_sptr
-                    (new frame_assembler_impl(options, debug, msgq_id, queue));
+                    (new frame_assembler_impl(options, debug, msgq_id, queue, d_soft_vocoder));
             }
 
         /*
@@ -107,7 +112,7 @@ namespace gr {
         /*
          * The private constructor
          */
-        frame_assembler_impl::frame_assembler_impl(const char* options, int debug, int msgq_id, gr::msg_queue::sptr queue)
+        frame_assembler_impl::frame_assembler_impl(const char* options, int debug, int msgq_id, gr::msg_queue::sptr queue, bool d_soft_vocoder)
             : gr::block("frame_assembler",
                     gr::io_signature::make (MIN_IN, MAX_IN, sizeof (char)),
 	                gr::io_signature::make ( 2, 2, sizeof(int16_t))),
@@ -122,7 +127,7 @@ namespace gr {
             else if (strcasecmp(options, "subchannel") == 0)
                 d_sync = new rx_subchannel(options, logts, debug, msgq_id, queue);
             else
-                d_sync = new rx_sync(options, logts, debug, msgq_id, queue, output_queue);
+                d_sync = new rx_sync(options, logts, debug, msgq_id, queue, output_queue, d_soft_vocoder);
         }
 
         int 
@@ -153,16 +158,26 @@ namespace gr {
         produce(0, output_queue[0].size());
         produce(1, output_queue[1].size());
 
-                if ((output_queue[0].size() > 0) || ( output_queue[1].size() > 0)) {
+            if ((output_queue[0].size() > 0) || ( output_queue[1].size() > 0)) {
         //BOOST_LOG_TRIVIAL(info) << "DMR Frame Assembler - Amt Prod: " << amt_produce << " output_queue 0: " << output_queue[0].size() << " output_queue 1: " << output_queue[1].size() <<" noutput_items: " <<  noutput_items;
         }
         for (int slot_id = 0; slot_id < 2; slot_id++) {
-        int16_t *out = (int16_t *)output_items[slot_id];
-        int src_id = d_sync->get_src_id(slot_id);
-        std::pair<bool,long> terminated = d_sync->get_terminated(slot_id);
-        if ((src_id != -1) && (src_id != 0)) {
-            BOOST_LOG_TRIVIAL(info) << "DMR Frame Assembler - sending src: " << src_id;
-            add_item_tag(0, nitems_written(0), pmt::intern("src_id"), pmt::from_long(src_id), pmt::intern(name()));
+          int16_t *out = (int16_t *)output_items[slot_id];
+          int src_id = d_sync->get_src_id(slot_id);
+          int dst_id = d_sync->get_dst_id(slot_id);
+          int cc = d_sync->get_cc(slot_id);
+          std::pair<bool,long> terminated = d_sync->get_terminated(slot_id);
+          if ((src_id != -1) && (src_id != 0)) {
+            BOOST_LOG_TRIVIAL(debug) << "DMR Frame Assembler - sending src: " << src_id;
+            add_item_tag(slot_id, nitems_written(slot_id), pmt::intern("src_id"), pmt::from_long(src_id), pmt::intern(name()));
+          }
+          if (dst_id != -1) {
+            BOOST_LOG_TRIVIAL(debug) << "DMR Frame Assembler - sending dst: " << dst_id;
+            add_item_tag(slot_id, nitems_written(slot_id), pmt::intern("grp_id"), pmt::from_long(dst_id), pmt::intern(name()));
+          }
+          if (cc != 0) {
+            BOOST_LOG_TRIVIAL(debug) << "DMR Frame Assembler - sending cc: " << cc;
+            add_item_tag(slot_id, nitems_written(slot_id), pmt::intern("cc"), pmt::from_long(cc), pmt::intern(name()));
           }
           /*
         if (terminated) {
