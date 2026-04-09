@@ -18,7 +18,7 @@ io_service my_tcp_io_service;
 long max_tcp_index = 0;
 
 struct audio_frame_t {
-  int16_t *samples;
+  std::vector<int16_t> samples;
   int sampleCount;
   long source_id;
   std::string call_short_name;
@@ -70,6 +70,11 @@ std::string create_call_key(Call *call) {
   return call->get_short_name() + "_" + std::to_string(call->get_talkgroup()) + "_" + std::to_string(call->get_call_num());
 }
 
+// Helper function to create a unique per-stream key for buffering
+std::string create_stream_buffer_key(Call *call, const stream_t &stream) {
+  return create_call_key(call) + "_" + std::to_string(stream.TGID) + "_" + stream.address + "_" + std::to_string(stream.port) + "_" + (stream.tcp ? "tcp" : "udp");
+}
+
 // Helper function to send buffered frames
 // This function is called when a source ID is detected for a buffered call.
 // It sends all previously buffered audio frames with the correct source ID.
@@ -86,7 +91,7 @@ void send_buffered_frames(call_buffer_t &buffer, long source_id, ip::udp::socket
           // This handles cases where frames were buffered with different source IDs
           long stream_source_id = (frame.source_id != -1) ? frame.source_id : source_id;
           std::vector<boost::asio::const_buffer> send_buffer;
-          uint32_t json_length = 0
+          uint32_t json_length = 0;
           if (stream.sendJSON == true) {
             json json_object = {
               {"src", stream_source_id},
@@ -111,7 +116,7 @@ void send_buffered_frames(call_buffer_t &buffer, long source_id, ip::udp::socket
             send_buffer.push_back(boost::asio::buffer(&frame.call_tgid, 4));
           }
           
-          send_buffer.push_back(boost::asio::buffer(frame.samples, frame.sampleCount * 2));
+          send_buffer.push_back(boost::asio::buffer(frame.samples.data(), frame.sampleCount * 2));
           
           if (stream.tcp == true) {
             try {
@@ -236,7 +241,7 @@ class Simple_Stream : public Plugin_Api {
             // BUFFERING LOGIC: Handle per-stream buffering for race condition mitigation
             // This addresses the issue where audio_stream() is called before source ID propagation
             if (stream.enable_buffering) {
-              std::string call_key = create_call_key(call) + "_" + std::to_string(stream.TGID);
+              std::string call_key = create_stream_buffer_key(call, stream);
               
               // Thread-safe buffer access
               std::lock_guard<std::mutex> lock(call_buffers_mutex);
@@ -272,7 +277,7 @@ class Simple_Stream : public Plugin_Api {
               if (!buffer.sending_started) {
                 // BUFFER FRAME: Store audio frame for later transmission
                 audio_frame_t frame;
-                frame.samples = samples;
+                frame.samples.assign(samples, samples + sampleCount);
                 frame.sampleCount = sampleCount;
                 frame.source_id = call_src;  // May be -1 if source not yet detected
                 frame.call_short_name = call_short_name;

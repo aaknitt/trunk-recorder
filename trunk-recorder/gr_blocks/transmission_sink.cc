@@ -254,9 +254,9 @@ void transmission_sink::set_source(long src) {
     } else {
       BOOST_LOG_TRIVIAL(error) << loghdr << "d_current_call is NULL";
     }
-  }
-  else if (d_conventional && (src != curr_src_id)) {
-    if ((state == RECORDING) && (d_sample_count > 0)) {
+  } else if (src != curr_src_id) {
+    if (d_conventional) {
+      if ((state == RECORDING) && (d_sample_count > 0)) {
         gr::thread::scoped_lock guard(d_mutex);
         BOOST_LOG_TRIVIAL(error) << loghdr << "Unit ID externally set, ext: " << src << "\tcurrent: " << curr_src_id << "\t samples: " << d_sample_count;
         end_transmission();
@@ -275,15 +275,13 @@ void transmission_sink::set_source(long src) {
         } else {
           BOOST_LOG_TRIVIAL(error) << loghdr << "Conventional: d_current_call is NULL";
         }
-    }
-
+      }
     } else {
       // this is a trunked system, where the existing source ID does not match the ID that just came in as a GRANT message
       BOOST_LOG_TRIVIAL(error) << loghdr << "Unit ID externally set from GRANT: " << src << "\t caching, doesn't match current: " << curr_src_id << "\t samples: " << d_sample_count << "\t state: " << format_state(state);
-      cached_src_id = src;      
+      cached_src_id = src;
     }
-  }
-  else if (d_conventional && (src == curr_src_id)) {
+  } else if (d_conventional && (src == curr_src_id)) {
     // Source ID is already set, but we need to ensure it's propagated to the call object
     if (d_current_call) {
       Call_impl *call_impl = dynamic_cast<Call_impl*>(d_current_call);
@@ -497,8 +495,6 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
 
       if (curr_src_id == -1) {
         // BOOST_LOG_TRIVIAL(info) << "Updated Voice Channel source id: " << src_id << " pos: " << pos << " offset: " << tags[i].offset - nitems_read(0);
-
-        curr_src_id = src_id;
         // Call set_source to propagate the source ID to the call object
         set_source(src_id);
       } else if (src_id != curr_src_id) {
@@ -516,8 +512,6 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
             } else {
               state = IDLE;
             }*/
-
-          curr_src_id = src_id;
           // Call set_source to propagate the source ID to the call object
           set_source(src_id);
         }

@@ -683,6 +683,10 @@ This plugin does not, by itself, stream audio to any online services.  Because i
 | sendTGID  |          |     false     | **true** / **false** | Deprecated.  Recommend using sendJSON for metadata instead.  If sendJSON is set to true, this setting will be ignored.  When set to true, the TGID will be prepended in long integer format (4 bytes, little endian) to the audio data each time a packet is sent. |
 | shortName |          |               | string               | shortName of the System that audio should be streamed for.  This should match the shortName of a system that is defined in the main section of the config file.  When omitted, all Systems will be streamed to the address and port configured.  If TGIDs from Systems overlap, JSON metadata should be used to prevent interleaved audio for talkgroups from different Systems with the same TGID.
 |  useTCP   |          |     false     | **true** / **false** | When set to true, TCP will be used instead of UDP.
+| enableBuffering |    | false         | **true** / **false** | When set to true, simplestream buffers early audio frames per call/stream and waits briefly for a source ID before sending audio. This helps avoid initial audio packets with `src=-1` metadata.
+| maxBufferFrames |    | 3             | number (1-10)        | Maximum number of frames to buffer per call/stream when `enableBuffering` is true. Values lower than 1 are set to 1; values higher than 10 are capped at 10.
+
+**Buffering behavior:** If a source ID is detected while buffering, buffered frames are immediately flushed with the detected source ID. If no source ID is detected by `maxBufferFrames`, buffered frames are sent anyway to avoid indefinite delay.
 
 ###### Plugin Object Example #1:
 This example will stream audio from talkgroup 58914 on system "CountyTrunked" to the local machine on UDP port 9123.
@@ -750,6 +754,23 @@ This example will stream audio from all talkgroups being recorded on System Coun
             "port":9123,
             "sendJSON":true,
             "shortName":"CountyTrunked"}
+        }
+```
+###### Plugin Object Example #5 (Buffering enabled):
+This example enables source-ID buffering so earliest audio frames are held briefly while waiting for source ID propagation.
+```yaml
+        {
+          "name":"simplestream",
+          "library":"libsimplestream.so",
+          "streams":[{
+            "TGID":58914,
+            "address":"127.0.0.1",
+            "port":9123,
+            "sendJSON":true,
+            "shortName":"CountyTrunked",
+            "enableBuffering":true,
+            "maxBufferFrames":3}
+          ]}
         }
 ```
 ##### Example - Sending Audio to pulseaudio
