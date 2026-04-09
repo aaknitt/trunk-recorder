@@ -684,7 +684,8 @@ This plugin does not, by itself, stream audio to any online services.  Because i
 | shortName |          |               | string               | shortName of the System that audio should be streamed for.  This should match the shortName of a system that is defined in the main section of the config file.  When omitted, all Systems will be streamed to the address and port configured.  If TGIDs from Systems overlap, JSON metadata should be used to prevent interleaved audio for talkgroups from different Systems with the same TGID.
 |  useTCP   |          |     false     | **true** / **false** | When set to true, TCP will be used instead of UDP.
 | enableBuffering |    | false         | **true** / **false** | When set to true, simplestream buffers early audio frames per call/stream and waits briefly for a source ID before sending audio. This helps avoid initial audio packets with `src=-1` metadata.
-| maxBufferFrames |    | 3             | number (1-10)        | Maximum number of frames to buffer per call/stream when `enableBuffering` is true. Values lower than 1 are set to 1; values higher than 10 are capped at 10.
+| maxBufferFrames |    | 3             | number (1-30)        | Maximum number of frames to buffer per call/stream when `enableBuffering` is true. Values lower than 1 are set to 1; values higher than 30 are capped at 30.
+| minSamplesPerPacket | | 2            | number (>=1)         | Minimum sample count required before simplestream sends a packet for this stream. Packets smaller than this threshold are ignored.
 
 **Buffering behavior:** If a source ID is detected while buffering, buffered frames are immediately flushed with the detected source ID. If no source ID is detected by `maxBufferFrames`, buffered frames are sent anyway to avoid indefinite delay.
 

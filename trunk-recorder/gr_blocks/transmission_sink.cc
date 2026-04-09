@@ -277,9 +277,22 @@ void transmission_sink::set_source(long src) {
         }
       }
     } else {
-      // this is a trunked system, where the existing source ID does not match the ID that just came in as a GRANT message
-      BOOST_LOG_TRIVIAL(error) << loghdr << "Unit ID externally set from GRANT: " << src << "\t caching, doesn't match current: " << curr_src_id << "\t samples: " << d_sample_count << "\t state: " << format_state(state);
+      // Trunked system source changed: update current source immediately and propagate to the call object.
+      BOOST_LOG_TRIVIAL(error) << loghdr << "Unit ID externally set from GRANT: " << src << "\t updating current source, previous: " << curr_src_id << "\t samples: " << d_sample_count << "\t state: " << format_state(state);
+      curr_src_id = src;
       cached_src_id = src;
+      if (d_current_call) {
+        Call_impl *call_impl = dynamic_cast<Call_impl*>(d_current_call);
+        if (call_impl) {
+          BOOST_LOG_TRIVIAL(debug) << loghdr << "Trunked: Calling call_impl->set_current_source_id(" << src << ")";
+          call_impl->set_current_source_id(src);
+          BOOST_LOG_TRIVIAL(debug) << loghdr << "After set_current_source_id, call->get_current_source_id()=" << d_current_call->get_current_source_id();
+        } else {
+          BOOST_LOG_TRIVIAL(error) << loghdr << "Trunked: Failed to cast call to Call_impl";
+        }
+      } else {
+        BOOST_LOG_TRIVIAL(error) << loghdr << "Trunked: d_current_call is NULL";
+      }
     }
   } else if (d_conventional && (src == curr_src_id)) {
     // Source ID is already set, but we need to ensure it's propagated to the call object
