@@ -15,7 +15,7 @@ typedef struct audio_frame_t audio_frame_t;
 typedef struct call_buffer_t call_buffer_t;
 
 std::vector<stream_t> streams;
-io_service my_tcp_io_service;
+boost::asio::io_context my_tcp_io_context;
 long max_tcp_index = 0;
 
 struct audio_frame_t {
@@ -174,10 +174,9 @@ void cleanup_stale_buffers() {
 }
 
 class Simple_Stream : public Plugin_Api {
-  typedef boost::asio::io_service io_service;
-  io_service my_io_service;
+  boost::asio::io_context my_io_context;
   ip::udp::endpoint remote_endpoint;
-  ip::udp::socket my_socket{my_io_service};
+  ip::udp::socket my_socket{my_io_context};
   public:
   
   Simple_Stream(){
@@ -190,7 +189,7 @@ class Simple_Stream : public Plugin_Api {
       stream.TGID = element["TGID"];
       stream.address = element["address"];
       stream.port = element["port"];
-      stream.remote_endpoint = ip::udp::endpoint(ip::address::from_string(stream.address), stream.port);
+      stream.remote_endpoint = ip::udp::endpoint(ip::make_address(stream.address), stream.port);
       stream.sendTGID = element.value("sendTGID",false);
       stream.sendJSON = element.value("sendJSON",false);
       stream.sendCallStart = element.value("sendCallStart",false);
@@ -544,9 +543,9 @@ class Simple_Stream : public Plugin_Api {
   int start(){
     BOOST_FOREACH (auto& stream, streams){
       if (stream.tcp == true){
-        ip::tcp::socket *my_tcp_socket = new ip::tcp::socket{my_tcp_io_service};
+        ip::tcp::socket *my_tcp_socket = new ip::tcp::socket{my_tcp_io_context};
         stream.tcp_socket = my_tcp_socket;
-        stream.tcp_socket->connect(ip::tcp::endpoint( boost::asio::ip::address::from_string(stream.address), stream.port ));
+        stream.tcp_socket->connect(ip::tcp::endpoint( ip::make_address(stream.address), stream.port ));
       }
     }
     my_socket.open(ip::udp::v4());
