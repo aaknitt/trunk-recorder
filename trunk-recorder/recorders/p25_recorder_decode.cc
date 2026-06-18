@@ -103,7 +103,7 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
 
   op25_frame_assembler = gr::op25_repeater::p25_frame_assembler::make(silence_frames, d_soft_vocoder, udp_host, udp_port, verbosity, do_imbe, do_output, do_msgq, rx_queue, do_audio_output, do_tdma, do_nocrypt);
   op25_frame_assembler->set_voice_codec_callback(voice_codec_cb_handler, this);
-  levels = gr::blocks::multiply_const_ss::make(1);
+  levels = gr::blocks::multiply_const_clip_ss::make(1);
 
   if (use_streaming) {
     plugin_sink = gr::blocks::plugin_wrapper_impl::make(std::bind(&p25_recorder_decode::plugin_callback_handler, this, std::placeholders::_1, std::placeholders::_2));

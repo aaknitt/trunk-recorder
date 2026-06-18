@@ -308,6 +308,7 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/gr_blocks/decoders/tps_decoder_sink_impl.cc
   trunk-recorder/gr_blocks/decoder_wrapper_impl.cc
   trunk-recorder/gr_blocks/plugin_wrapper_impl.cc
+  trunk-recorder/gr_blocks/multiply_const_clip_ss.cc
   trunk-recorder/gr_blocks/selector_impl.cc
   trunk-recorder/gr_blocks/pwr_squelch_cc_impl.cc
   trunk-recorder/gr_blocks/squelch_base_cc_impl.cc
